@@ -97,6 +97,14 @@ go run .
 `error=INVALID_INPUT`；未知编号返回 HTTP 404，响应体固定为纯文本
 `error=VULNERABILITY_NOT_FOUND`。更新只改变处置状态，其余字段保持不变。
 
+### `GET /vulnerabilities/:id`
+
+按编号取回一条完整漏洞记录。路径中的编号按登记值精确匹配，不做大小写折叠、
+去空格或模糊匹配。命中返回 HTTP 200 与单个 JSON 对象，包含 `id`、`component`、
+`affected_ranges`、`severity`、`fixed_version`、`status`；`affected_ranges` 保持
+登记顺序，开放边界对应字段为 `null`。未知编号返回 HTTP 404，响应体固定为纯文本
+`error=VULNERABILITY_NOT_FOUND`。此入口只读，不改变任何已登记数据。
+
 ## 版本顺序
 
 版本号是一个或多个用点分隔的十进制数字段（如 `1`、`1.0.3`、`10.2.0`）。

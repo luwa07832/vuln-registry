@@ -295,3 +295,73 @@ func TestUpdateStatusInvalidInputs(t *testing.T) {
 		t.Fatalf("missing status: status=%d body=%q", missing.Code, missing.Body.String())
 	}
 }
+
+func TestGetVulnerabilityReturnsFullRecord(t *testing.T) {
+	router := newTestRouter(t)
+	registerVulnerability(t, router, validCreateBody("CVE-2024-0007"))
+
+	recorder := doJSON(t, router, http.MethodGet, "/vulnerabilities/CVE-2024-0007", nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", recorder.Code, recorder.Body.String())
+	}
+	var record struct {
+		ID        string `json:"id"`
+		Component string `json:"component"`
+		Ranges    []struct {
+			Lower        *string `json:"lower"`
+			LowerInclude *bool   `json:"lower_include"`
+			Upper        *string `json:"upper"`
+			UpperInclude *bool   `json:"upper_include"`
+		} `json:"affected_ranges"`
+		Severity     string `json:"severity"`
+		FixedVersion string `json:"fixed_version"`
+		Status       string `json:"status"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &record); err != nil {
+		t.Fatalf("unmarshal: %v body=%s", err, recorder.Body.String())
+	}
+	if record.ID != "CVE-2024-0007" || record.Component != "libxml2" ||
+		record.Severity != "high" || record.FixedVersion != "2.10.0" || record.Status != "open" {
+		t.Fatalf("scalar fields wrong: %#v", record)
+	}
+	if len(record.Ranges) != 2 {
+		t.Fatalf("ranges must keep registration order and count: %#v", record.Ranges)
+	}
+	first := record.Ranges[0]
+	if first.Lower == nil || *first.Lower != "2.0" || first.LowerInclude == nil || !*first.LowerInclude ||
+		first.Upper == nil || *first.Upper != "2.9" || first.UpperInclude == nil || *first.UpperInclude {
+		t.Fatalf("first range wrong: %#v", first)
+	}
+	second := record.Ranges[1]
+	if second.Lower != nil || second.LowerInclude != nil {
+		t.Fatalf("open lower bound must serialize as null: %#v", second)
+	}
+	if second.Upper == nil || *second.Upper != "1.5.0" || second.UpperInclude == nil || !*second.UpperInclude {
+		t.Fatalf("second range wrong: %#v", second)
+	}
+}
+
+func TestGetVulnerabilityUnknownID(t *testing.T) {
+	router := newTestRouter(t)
+	registerVulnerability(t, router, validCreateBody("CVE-2024-0008"))
+
+	recorder := doJSON(t, router, http.MethodGet, "/vulnerabilities/CVE-9999-0000", nil)
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", recorder.Code)
+	}
+	if body := recorder.Body.String(); body != "error=VULNERABILITY_NOT_FOUND" {
+		t.Fatalf("body = %q", body)
+	}
+}
+
+func TestGetVulnerabilityMatchesIDExactly(t *testing.T) {
+	router := newTestRouter(t)
+	registerVulnerability(t, router, validCreateBody("CVE-2024-0009"))
+
+	for _, id := range []string{"cve-2024-0009", "CVE-2024-0009%20", "CVE-2024-000"} {
+		recorder := doJSON(t, router, http.MethodGet, "/vulnerabilities/"+id, nil)
+		if recorder.Code != http.StatusNotFound || recorder.Body.String() != "error=VULNERABILITY_NOT_FOUND" {
+			t.Fatalf("%s: status=%d body=%q", id, recorder.Code, recorder.Body.String())
+		}
+	}
+}
