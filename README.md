@@ -90,6 +90,18 @@ go run .
 - 组件为空或版本非法时返回 HTTP 400 与 `error=INVALID_INPUT`。
 - 合法但无结果时返回 HTTP 200，响应体为稳定的空数组 `[]`。
 
+### `GET /vulnerabilities/:id`
+
+按编号取回单条漏洞的完整登记内容，路径中的 `id` 与登记编号精确匹配
+（区分大小写，不做去空格或模糊匹配）。命中时返回 HTTP 200 与单个 JSON 对象，
+包含 `id`、`component`、`affected_ranges`、`severity`、`fixed_version`、
+`status`；`affected_ranges` 保持登记顺序，每个区间的边界与包含标志沿用登记时的
+JSON 语义，开放边界对应字段为 `null`。
+
+未知编号返回 HTTP 404，响应体固定为纯文本 `error=VULNERABILITY_NOT_FOUND`。
+该入口为只读操作；存储读取失败时返回 HTTP 500，沿用 `{"error":...}` 的
+JSON 错误对象格式。
+
 ### `PATCH /vulnerabilities/status/:id`
 
 更新已有漏洞的处置状态，请求体为 `{"status":"fixed"}`，取值集合与登记相同。

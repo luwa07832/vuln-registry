@@ -57,9 +57,25 @@ func registerHandlers(router *gin.Engine, st *store.Store) {
 	router.GET("/vulnerabilities/affected", func(c *gin.Context) {
 		queryAffected(c, st)
 	})
+	router.GET("/vulnerabilities/:id", func(c *gin.Context) {
+		getVulnerability(c, st)
+	})
 	router.PATCH("/vulnerabilities/status/:id", func(c *gin.Context) {
 		updateStatus(c, st)
 	})
+}
+
+func getVulnerability(c *gin.Context, st *store.Store) {
+	record, err := st.GetVulnerability(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		if errors.Is(err, store.ErrVulnerabilityNotFound) {
+			respondFixed(c, http.StatusNotFound, codeNotFound)
+			return
+		}
+		respondStorageError(c)
+		return
+	}
+	c.JSON(http.StatusOK, record)
 }
 
 func createVulnerability(c *gin.Context, st *store.Store) {
