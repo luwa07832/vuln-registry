@@ -139,6 +139,9 @@ func registerHandlers(router *gin.Engine, st *store.Store) {
 	router.GET("/vulnerabilities/:id", func(c *gin.Context) {
 		getVulnerability(c, st)
 	})
+	router.PUT("/vulnerabilities/:id", func(c *gin.Context) {
+		updateVulnerability(c, st)
+	})
 	router.PATCH("/vulnerabilities/status/:id", func(c *gin.Context) {
 		updateStatus(c, st)
 	})
@@ -475,6 +478,38 @@ func updateStatus(c *gin.Context, st *store.Store) {
 		return
 	}
 	c.JSON(http.StatusOK, record)
+}
+
+// updateVulnerability fully replaces every field of an existing record
+// except its id, which comes from the path and is matched exactly. The body
+// is parsed and validated before the id is looked up, so an invalid body
+// answers INVALID_INPUT even when the id is unknown; any id carried in the
+// body and unknown fields are ignored. The store applies the replacement in
+// one transaction, so a failure never leaves partial fields or ranges.
+func updateVulnerability(c *gin.Context, st *store.Store) {
+	var request createVulnerabilityRequest
+	if err := decodeBody(c, &request); err != nil {
+		respondInvalidInput(c)
+		return
+	}
+	request.ID = c.Param("id")
+
+	record, ok := buildVulnerabilityRecord(request)
+	if !ok {
+		respondInvalidInput(c)
+		return
+	}
+
+	updated, err := st.UpdateVulnerability(c.Request.Context(), record)
+	if err != nil {
+		if errors.Is(err, store.ErrVulnerabilityNotFound) {
+			respondFixed(c, http.StatusNotFound, codeNotFound)
+			return
+		}
+		respondStorageError(c)
+		return
+	}
+	c.JSON(http.StatusOK, updated)
 }
 
 // listVulnerabilities serves the paginated list entry. The component,

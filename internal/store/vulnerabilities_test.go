@@ -155,3 +155,110 @@ func mustParse(t *testing.T, value string) vuln.Version {
 	}
 	return parsed
 }
+
+func TestUpdateVulnerabilityReplacesAllFields(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	record := sampleVulnerability("CVE-2024-0030")
+	if err := record.PrepareRanges(); err != nil {
+		t.Fatalf("prepare original: %v", err)
+	}
+	if err := st.CreateVulnerability(ctx, record); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	replacement := &vuln.Vulnerability{
+		ID:           "CVE-2024-0030",
+		Component:    "openssl",
+		Severity:     vuln.SeverityCritical,
+		FixedVersion: "3.1.1",
+		Status:       vuln.StatusAccepted,
+		Ranges: []vuln.Range{
+			{Upper: &[]string{"1.0.0"}[0], UpperInclude: &[]bool{true}[0]},
+			{Lower: &[]string{"3.0"}[0], LowerInclude: &[]bool{false}[0]},
+		},
+	}
+	if err := replacement.PrepareRanges(); err != nil {
+		t.Fatalf("prepare replacement: %v", err)
+	}
+
+	updated, err := st.UpdateVulnerability(ctx, replacement)
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if updated.ID != "CVE-2024-0030" || updated.Component != "openssl" ||
+		updated.Severity != vuln.SeverityCritical || updated.FixedVersion != "3.1.1" ||
+		updated.Status != vuln.StatusAccepted {
+		t.Fatalf("scalar fields wrong: %#v", updated)
+	}
+	if len(updated.Ranges) != 2 {
+		t.Fatalf("ranges = %d, want 2", len(updated.Ranges))
+	}
+	if updated.Ranges[0].LowerText() != "" || updated.Ranges[0].UpperText() != "1.0.0" {
+		t.Fatalf("first range wrong: %#v", updated.Ranges[0])
+	}
+	if updated.Ranges[1].LowerText() != "3.0" || updated.Ranges[1].UpperText() != "" ||
+		updated.Ranges[1].LowerInclude == nil || *updated.Ranges[1].LowerInclude {
+		t.Fatalf("second range wrong: %#v", updated.Ranges[1])
+	}
+
+	loaded, err := st.GetVulnerability(ctx, "CVE-2024-0030")
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if loaded.Component != "openssl" || len(loaded.Ranges) != 2 {
+		t.Fatalf("stored record not fully replaced: %#v", loaded)
+	}
+}
+
+func TestUpdateVulnerabilityUnknownID(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	missing := sampleVulnerability("CVE-2024-0031")
+	if err := missing.PrepareRanges(); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if _, err := st.UpdateVulnerability(ctx, missing); !errors.Is(err, ErrVulnerabilityNotFound) {
+		t.Fatalf("update unknown: %v, want ErrVulnerabilityNotFound", err)
+	}
+}
+
+func TestUpdateVulnerabilityKeepsIDAndOtherRecords(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	first := sampleVulnerability("CVE-2024-0032")
+	second := sampleVulnerability("CVE-2024-0033")
+	if err := first.PrepareRanges(); err != nil {
+		t.Fatalf("prepare first: %v", err)
+	}
+	if err := second.PrepareRanges(); err != nil {
+		t.Fatalf("prepare second: %v", err)
+	}
+	if err := st.CreateVulnerability(ctx, first); err != nil {
+		t.Fatalf("create first: %v", err)
+	}
+	if err := st.CreateVulnerability(ctx, second); err != nil {
+		t.Fatalf("create second: %v", err)
+	}
+
+	first.Component = "zlib"
+	first.Status = vuln.StatusWontFix
+	if _, err := st.UpdateVulnerability(ctx, first); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	updated, err := st.GetVulnerability(ctx, "CVE-2024-0032")
+	if err != nil {
+		t.Fatalf("get updated: %v", err)
+	}
+	if updated.Component != "zlib" || updated.Status != vuln.StatusWontFix {
+		t.Fatalf("updated fields wrong: %#v", updated)
+	}
+	untouched, err := st.GetVulnerability(ctx, "CVE-2024-0033")
+	if err != nil {
+		t.Fatalf("get untouched: %v", err)
+	}
+	if untouched.Component != "libxml2" || untouched.Status != vuln.StatusOpen || len(untouched.Ranges) != 2 {
+		t.Fatalf("other record changed: %#v", untouched)
+	}
+}

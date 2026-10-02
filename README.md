@@ -211,6 +211,31 @@ JSON 错误对象格式。
 `error=INVALID_INPUT`；未知编号返回 HTTP 404，响应体固定为纯文本
 `error=VULNERABILITY_NOT_FOUND`。更新只改变处置状态，其余字段保持不变。
 
+### `PUT /vulnerabilities/:id`
+
+完整修正一条已有漏洞，登记写错后无需更换编号。编号由路径决定，与
+`GET /vulnerabilities/:id` 沿用相同的精确匹配规则（区分大小写，不做去空格或
+模糊匹配）；请求体中的 `id` 与任何无关字段均忽略。请求体是单个 JSON 对象，
+`component`、`affected_ranges`、`severity`、`fixed_version`、`status` 的字段
+含义、必填条件、版本与区间语义（开放边界、包含标志、区间反向、等端点须同时
+包含等）以及严重等级与处置状态取值，与 `POST /vulnerabilities` 完全一致。
+
+成功时在单个事务内整体替换除编号外的全部内容（含全部受影响区间），返回
+HTTP 200 与包含 `id`、`component`、`affected_ranges`、`severity`、
+`fixed_version`、`status` 的完整记录；`affected_ranges` 保持请求顺序，开放
+边界字段为 `null`。更新不改变编号，更新后的查询使用新组件、新区间、新严重
+等级、新修复版本与新处置状态。
+
+- 请求体不是单个 JSON 对象、解析失败、必填字段缺失或为空、
+  `affected_ranges` 为空或含非法区间、版本或边界包含标志非法、区间反向、
+  上下界相等却未同时包含、`fixed_version` 非法、`severity` 或 `status`
+  越界时，返回 HTTP 400 与固定纯文本 `error=INVALID_INPUT`。请求体先于编号
+  校验：即使路径编号不存在，无效请求仍返回 `INVALID_INPUT`。
+- 请求体有效但编号未知时返回 HTTP 404，响应体固定为纯文本
+  `error=VULNERABILITY_NOT_FOUND`。
+- 更新整体成功或整体失败，失败不留下部分字段或区间。存储写入失败返回
+  HTTP 500 与现有 `internal_error` JSON 错误对象，不泄露 SQL、堆栈或文件路径。
+
 ### `GET /vulnerabilities`
 
 分页列出已登记的漏洞。查询参数均可选并任意组合，缺省表示不按该字段过滤：

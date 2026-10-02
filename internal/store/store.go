@@ -216,6 +216,67 @@ func (s *Store) UpdateStatus(ctx context.Context, id string, status vuln.Status)
 	return s.GetVulnerability(ctx, id)
 }
 
+// UpdateVulnerability replaces every column except the id and all of the
+// record's affected ranges in a single transaction. It returns
+// ErrVulnerabilityNotFound when the id is unknown; on any failure the
+// transaction rolls back and the stored record stays byte-for-byte intact.
+// The id on vulnerability must already equal the path id; callers validate
+// the payload before calling.
+func (s *Store) UpdateVulnerability(ctx context.Context, vulnerability *vuln.Vulnerability) (*vuln.Vulnerability, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin update: %w", err)
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(ctx, `
+		UPDATE vulnerabilities
+		SET component = ?, severity = ?, fixed_version = ?, status = ?
+		WHERE id = ?`,
+		vulnerability.Component, string(vulnerability.Severity),
+		vulnerability.FixedVersion, string(vulnerability.Status), vulnerability.ID)
+	if err != nil {
+		return nil, fmt.Errorf("update vulnerability: %w", err)
+	}
+	affectedRows, err := result.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("update vulnerability rows: %w", err)
+	}
+	if affectedRows == 0 {
+		return nil, ErrVulnerabilityNotFound
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM affected_ranges WHERE vulnerability_id = ?", vulnerability.ID,
+	); err != nil {
+		return nil, fmt.Errorf("delete affected ranges: %w", err)
+	}
+	for index, affected := range vulnerability.Ranges {
+		var lower, upper any
+		if text := affected.LowerText(); text != "" {
+			lower = text
+		}
+		if text := affected.UpperText(); text != "" {
+			upper = text
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO affected_ranges
+				(vulnerability_id, position, lower_version, lower_include, upper_version, upper_include)
+			VALUES (?, ?, ?, ?, ?, ?)`,
+			vulnerability.ID, index,
+			lower, boolToInt(affected.LowerInclude),
+			upper, boolToInt(affected.UpperInclude),
+		); err != nil {
+			return nil, fmt.Errorf("insert affected range: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit update: %w", err)
+	}
+	return s.GetVulnerability(ctx, vulnerability.ID)
+}
+
 // ListFilter carries the optional equality filters accepted by
 // ListVulnerabilities. A nil field means the column is not filtered; every
 // set field must match, so the filters intersect.
