@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	_ "modernc.org/sqlite"
 	libsqlite "modernc.org/sqlite"
@@ -177,6 +178,80 @@ func (s *Store) UpdateStatus(ctx context.Context, id string, status vuln.Status)
 		return nil, ErrVulnerabilityNotFound
 	}
 	return s.GetVulnerability(ctx, id)
+}
+
+// ListFilter carries the optional equality filters accepted by
+// ListVulnerabilities. A nil field means the column is not filtered; every
+// set field must match, so the filters intersect.
+type ListFilter struct {
+	Component *string
+	Severity  *vuln.Severity
+	Status    *vuln.Status
+}
+
+// clause renders the filter as a WHERE fragment with positional arguments.
+func (f ListFilter) clause() (string, []any) {
+	conditions := []string{}
+	args := []any{}
+	if f.Component != nil {
+		conditions = append(conditions, "component = ?")
+		args = append(args, *f.Component)
+	}
+	if f.Severity != nil {
+		conditions = append(conditions, "severity = ?")
+		args = append(args, string(*f.Severity))
+	}
+	if f.Status != nil {
+		conditions = append(conditions, "status = ?")
+		args = append(args, string(*f.Status))
+	}
+	if len(conditions) == 0 {
+		return "", nil
+	}
+	return " WHERE " + strings.Join(conditions, " AND "), args
+}
+
+// ListVulnerabilities returns the records matching every given filter,
+// ordered by id ascending and sliced to the requested 1-based page, along
+// with the total number of matching records before slicing. A page past the
+// end yields an empty slice with the total still reported.
+func (s *Store) ListVulnerabilities(ctx context.Context, filter ListFilter, page, pageSize int) ([]*vuln.Vulnerability, int, error) {
+	where, args := filter.clause()
+
+	var total int
+	if err := s.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM vulnerabilities"+where, args...,
+	).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count vulnerabilities: %w", err)
+	}
+
+	pageArgs := append(append([]any{}, args...), pageSize, (page-1)*pageSize)
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, component, severity, fixed_version, status
+		FROM vulnerabilities`+where+`
+		ORDER BY id ASC LIMIT ? OFFSET ?`, pageArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list vulnerabilities: %w", err)
+	}
+	defer rows.Close()
+
+	vulnerabilities := []*vuln.Vulnerability{}
+	for rows.Next() {
+		record, err := scanVulnerability(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		vulnerabilities = append(vulnerabilities, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("scan vulnerabilities: %w", err)
+	}
+	for _, record := range vulnerabilities {
+		if err := s.loadRanges(ctx, record); err != nil {
+			return nil, 0, err
+		}
+	}
+	return vulnerabilities, total, nil
 }
 
 type rowScanner interface {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 
@@ -39,6 +40,15 @@ type updateStatusRequest struct {
 	Status string `json:"status"`
 }
 
+// listVulnerabilitiesResponse is the paginated list payload; items carries
+// the full records of the requested page.
+type listVulnerabilitiesResponse struct {
+	Items    []*vuln.Vulnerability `json:"items"`
+	Page     int                   `json:"page"`
+	PageSize int                   `json:"page_size"`
+	Total    int                   `json:"total"`
+}
+
 // affectedVulnerability is one element of the affected-query result; it carries
 // only the requested projection of the full record.
 type affectedVulnerability struct {
@@ -53,6 +63,9 @@ type affectedVulnerability struct {
 func registerHandlers(router *gin.Engine, st *store.Store) {
 	router.POST("/vulnerabilities", func(c *gin.Context) {
 		createVulnerability(c, st)
+	})
+	router.GET("/vulnerabilities", func(c *gin.Context) {
+		listVulnerabilities(c, st)
 	})
 	router.GET("/vulnerabilities/affected", func(c *gin.Context) {
 		queryAffected(c, st)
@@ -191,6 +204,85 @@ func updateStatus(c *gin.Context, st *store.Store) {
 		return
 	}
 	c.JSON(http.StatusOK, record)
+}
+
+// listVulnerabilities serves the paginated list entry. The component,
+// severity and status filters intersect; any other query parameter is
+// ignored rather than rejected.
+func listVulnerabilities(c *gin.Context, st *store.Store) {
+	filter := store.ListFilter{}
+	if component, present := c.GetQuery("component"); present {
+		if component == "" {
+			respondInvalidInput(c)
+			return
+		}
+		filter.Component = &component
+	}
+	if severity, present := c.GetQuery("severity"); present {
+		parsed := vuln.Severity(severity)
+		if !vuln.ValidSeverity(parsed) {
+			respondInvalidInput(c)
+			return
+		}
+		filter.Severity = &parsed
+	}
+	if status, present := c.GetQuery("status"); present {
+		parsed := vuln.Status(status)
+		if !vuln.ValidStatus(parsed) {
+			respondInvalidInput(c)
+			return
+		}
+		filter.Status = &parsed
+	}
+
+	page := 1
+	if raw, present := c.GetQuery("page"); present {
+		parsed, ok := parsePositiveDecimal(raw)
+		if !ok {
+			respondInvalidInput(c)
+			return
+		}
+		page = parsed
+	}
+	pageSize := 20
+	if raw, present := c.GetQuery("page_size"); present {
+		parsed, ok := parsePositiveDecimal(raw)
+		if !ok || parsed > 100 {
+			respondInvalidInput(c)
+			return
+		}
+		pageSize = parsed
+	}
+
+	records, total, err := st.ListVulnerabilities(c.Request.Context(), filter, page, pageSize)
+	if err != nil {
+		respondStorageError(c)
+		return
+	}
+	c.JSON(http.StatusOK, listVulnerabilitiesResponse{
+		Items:    records,
+		Page:     page,
+		PageSize: pageSize,
+		Total:    total,
+	})
+}
+
+// parsePositiveDecimal accepts only strings of decimal digits that form a
+// positive integer, rejecting signs, whitespace, fractions and overflow.
+func parsePositiveDecimal(raw string) (int, bool) {
+	if raw == "" {
+		return 0, false
+	}
+	for _, digit := range raw {
+		if digit < '0' || digit > '9' {
+			return 0, false
+		}
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 1 {
+		return 0, false
+	}
+	return value, true
 }
 
 func decodeBody(c *gin.Context, target any) error {

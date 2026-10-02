@@ -109,6 +109,34 @@ JSON 错误对象格式。
 `error=INVALID_INPUT`；未知编号返回 HTTP 404，响应体固定为纯文本
 `error=VULNERABILITY_NOT_FOUND`。更新只改变处置状态，其余字段保持不变。
 
+### `GET /vulnerabilities`
+
+分页列出已登记的漏洞。查询参数均可选并任意组合，缺省表示不按该字段过滤：
+
+| 参数 | 要求 |
+|---|---|
+| `component` | 精确匹配，区分大小写；显式给出时不能为空 |
+| `severity` | `low`、`medium`、`high`、`critical` 之一 |
+| `status` | `open`、`in_progress`、`fixed`、`wont_fix`、`accepted` 之一 |
+| `page` | 从 1 开始的页码，缺省为 1 |
+| `page_size` | 每页条数，缺省为 20，范围 1 到 100 |
+
+三个筛选条件互为交集，`fixed_version` 不参与筛选；其他查询参数不参与筛选，
+也不单独报错。成功返回 HTTP 200 与单个 JSON 对象：
+
+```json
+{"items":[{"id":"CVE-2024-0001","component":"libxml2","affected_ranges":[{"lower":"2.0","lower_include":true,"upper":"2.9","upper_include":false},{"lower":null,"lower_include":null,"upper":"1.5.0","upper_include":true}],"severity":"high","fixed_version":"2.10.0","status":"open"}],"page":1,"page_size":20,"total":1}
+```
+
+`items` 是命中的完整漏洞记录，字段与按编号读取一致，`affected_ranges`
+保持登记顺序，开放边界为 `null`。记录按编号升序后按 `page` 与 `page_size`
+切片；`total` 是筛选后的总记录数，`page` 与 `page_size` 回显有效请求值。
+合法查询无命中或页码超过总页数时 `items` 为空数组，其余三个字段仍返回
+确定值，不返回 404。`page`、`page_size` 不是正十进制整数或越界，以及筛选值
+非法（显式 `component` 为空、`severity` 或 `status` 不在允许集合内）时，返回
+HTTP 400 与纯文本 `error=INVALID_INPUT`。存储读取失败时返回 HTTP 500 与
+`internal_error` JSON 错误对象。
+
 ## 版本顺序
 
 版本号是一个或多个用点分隔的十进制数字段（如 `1`、`1.0.3`、`10.2.0`）。
