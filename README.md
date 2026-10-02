@@ -80,6 +80,36 @@ go run .
 边界非空却缺少对应的包含标志、下界严格大于上界、上下界相等但任一侧为开区间、
 严重等级或处置状态不在允许集合内。登记在单个事务内完成，失败不会部分写入。
 
+### `GET /vulnerabilities`
+
+分页检索已登记漏洞的清单，按编号升序返回。支持以下查询参数，三个筛选条件可
+任意组合，缺省即表示不按该字段过滤；其余查询参数不参与筛选，也不会单独报错：
+
+| 参数 | 要求 |
+|---|---|
+| `component` | 显式给出时不能为空，精确匹配且区分大小写 |
+| `severity` | 显式给出时必须是登记允许的四个取值之一 |
+| `status` | 显式给出时必须是登记允许的五个取值之一 |
+| `page` | 从 1 开始的页码，正十进制整数，缺省为 `1` |
+| `page_size` | 每页条数，正十进制整数，缺省为 `20`，范围 1–100 |
+
+筛选条件互为交集；`fixed_version` 不参与筛选。成功返回 HTTP 200 与单个 JSON
+对象，包含 `items`、`page`、`page_size`、`total`：
+
+```json
+{"items":[],"page":1,"page_size":20,"total":0}
+```
+
+`items` 是命中记录的完整漏洞对象数组（字段与 `GET /vulnerabilities/:id` 相同，
+`affected_ranges` 保持登记顺序，开放边界为 `null`）；`total` 是筛选后的总记录
+数，`page` 与 `page_size` 回显有效请求值。合法查询无命中或页码超过总页数时
+`items` 为空数组，仍返回 HTTP 200 与确定的其余三个字段，不返回 404。
+
+`component` 显式为空、`severity` 或 `status` 取值非法、`page` 或 `page_size`
+不是正十进制整数或越界（含 `0`、负数、小数、前导零等写法）时返回 HTTP 400 与
+纯文本 `error=INVALID_INPUT`。存储读取失败时返回 HTTP 500，沿用
+`{"error":...}` 的 JSON 错误对象格式。
+
 ### `GET /vulnerabilities/affected`
 
 按组件名称与具体版本查询当前仍受影响的漏洞，查询参数为 `component` 与 `version`。

@@ -147,6 +147,76 @@ func TestUpdateStatusChangesOnlyStatus(t *testing.T) {
 	}
 }
 
+func TestListVulnerabilitiesFiltersPaginatesAndCounts(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	specs := []struct {
+		id       string
+		severity vuln.Severity
+		status   vuln.Status
+	}{
+		{"CVE-2024-0003", vuln.SeverityHigh, vuln.StatusFixed},
+		{"CVE-2024-0001", vuln.SeverityLow, vuln.StatusOpen},
+		{"CVE-2024-0002", vuln.SeverityHigh, vuln.StatusOpen},
+	}
+	for _, spec := range specs {
+		record := sampleVulnerability(spec.id)
+		record.Severity = spec.severity
+		record.Status = spec.status
+		if err := record.PrepareRanges(); err != nil {
+			t.Fatalf("prepare: %v", err)
+		}
+		if err := st.CreateVulnerability(ctx, record); err != nil {
+			t.Fatalf("create %s: %v", spec.id, err)
+		}
+	}
+
+	all, total, err := st.ListVulnerabilities(ctx, VulnerabilityFilter{}, 1, 20)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if total != 3 || len(all) != 3 {
+		t.Fatalf("unfiltered list wrong: total=%d len=%d", total, len(all))
+	}
+	if all[0].ID != "CVE-2024-0001" || all[1].ID != "CVE-2024-0002" || all[2].ID != "CVE-2024-0003" {
+		t.Fatalf("ids not sorted: %#v", all)
+	}
+
+	openHigh, filteredTotal, err := st.ListVulnerabilities(ctx, VulnerabilityFilter{
+		Component: "libxml2",
+		Severity:  vuln.SeverityHigh,
+		Status:    vuln.StatusOpen,
+	}, 1, 20)
+	if err != nil {
+		t.Fatalf("filtered list: %v", err)
+	}
+	if filteredTotal != 1 || len(openHigh) != 1 || openHigh[0].ID != "CVE-2024-0002" {
+		t.Fatalf("filtered list wrong: total=%d records=%#v", filteredTotal, openHigh)
+	}
+
+	firstPage, firstTotal, err := st.ListVulnerabilities(ctx, VulnerabilityFilter{}, 1, 2)
+	if err != nil {
+		t.Fatalf("page 1: %v", err)
+	}
+	if firstTotal != 3 || len(firstPage) != 2 || firstPage[0].ID != "CVE-2024-0001" || firstPage[1].ID != "CVE-2024-0002" {
+		t.Fatalf("first page wrong: total=%d page=%#v", firstTotal, firstPage)
+	}
+	secondPage, _, err := st.ListVulnerabilities(ctx, VulnerabilityFilter{}, 2, 2)
+	if err != nil {
+		t.Fatalf("page 2: %v", err)
+	}
+	if len(secondPage) != 1 || secondPage[0].ID != "CVE-2024-0003" {
+		t.Fatalf("second page wrong: %#v", secondPage)
+	}
+	beyond, beyondTotal, err := st.ListVulnerabilities(ctx, VulnerabilityFilter{}, 3, 2)
+	if err != nil {
+		t.Fatalf("beyond range: %v", err)
+	}
+	if len(beyond) != 0 || beyondTotal != 3 {
+		t.Fatalf("beyond-range page wrong: len=%d total=%d", len(beyond), beyondTotal)
+	}
+}
+
 func mustParse(t *testing.T, value string) vuln.Version {
 	t.Helper()
 	parsed, err := vuln.ParseVersion(value)

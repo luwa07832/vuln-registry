@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	_ "modernc.org/sqlite"
 	libsqlite "modernc.org/sqlite"
@@ -158,6 +159,76 @@ func (s *Store) ListByComponent(ctx context.Context, component string) ([]*vuln.
 		}
 	}
 	return vulnerabilities, nil
+}
+
+// VulnerabilityFilter narrows a list query. The zero value of every field
+// means that column is not filtered; callers never set empty sentinels.
+type VulnerabilityFilter struct {
+	Component string
+	Severity  vuln.Severity
+	Status    vuln.Status
+}
+
+// ListVulnerabilities returns one page of records matching filter, ordered by
+// id ascending, alongside the total number of matching records across every
+// page. Page numbers start at 1.
+func (s *Store) ListVulnerabilities(ctx context.Context, filter VulnerabilityFilter, page, pageSize int) ([]*vuln.Vulnerability, int, error) {
+	clauses := make([]string, 0, 3)
+	args := make([]any, 0, 3)
+	if filter.Component != "" {
+		clauses = append(clauses, "component = ?")
+		args = append(args, filter.Component)
+	}
+	if filter.Severity != "" {
+		clauses = append(clauses, "severity = ?")
+		args = append(args, string(filter.Severity))
+	}
+	if filter.Status != "" {
+		clauses = append(clauses, "status = ?")
+		args = append(args, string(filter.Status))
+	}
+	where := ""
+	if len(clauses) > 0 {
+		where = " WHERE " + strings.Join(clauses, " AND ")
+	}
+
+	var total int
+	if err := s.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM vulnerabilities"+where, args...,
+	).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count vulnerabilities: %w", err)
+	}
+
+	pageArgs := make([]any, 0, len(args)+2)
+	pageArgs = append(pageArgs, args...)
+	pageArgs = append(pageArgs, pageSize, (page-1)*pageSize)
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, component, severity, fixed_version, status
+		FROM vulnerabilities`+where+`
+		ORDER BY id ASC
+		LIMIT ? OFFSET ?`, pageArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list vulnerabilities: %w", err)
+	}
+	defer rows.Close()
+
+	vulnerabilities := []*vuln.Vulnerability{}
+	for rows.Next() {
+		record, err := scanVulnerability(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		vulnerabilities = append(vulnerabilities, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("scan vulnerabilities: %w", err)
+	}
+	for _, record := range vulnerabilities {
+		if err := s.loadRanges(ctx, record); err != nil {
+			return nil, 0, err
+		}
+	}
+	return vulnerabilities, total, nil
 }
 
 // UpdateStatus changes only the disposition status of one record. It returns

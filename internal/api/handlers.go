@@ -39,6 +39,14 @@ type updateStatusRequest struct {
 	Status string `json:"status"`
 }
 
+// vulnerabilityListPage is the single-object envelope of the paginated list entry.
+type vulnerabilityListPage struct {
+	Items    []*vuln.Vulnerability `json:"items"`
+	Page     int                   `json:"page"`
+	PageSize int                   `json:"page_size"`
+	Total    int                   `json:"total"`
+}
+
 // affectedVulnerability is one element of the affected-query result; it carries
 // only the requested projection of the full record.
 type affectedVulnerability struct {
@@ -54,6 +62,9 @@ func registerHandlers(router *gin.Engine, st *store.Store) {
 	router.POST("/vulnerabilities", func(c *gin.Context) {
 		createVulnerability(c, st)
 	})
+	router.GET("/vulnerabilities", func(c *gin.Context) {
+		listVulnerabilities(c, st)
+	})
 	router.GET("/vulnerabilities/affected", func(c *gin.Context) {
 		queryAffected(c, st)
 	})
@@ -63,6 +74,91 @@ func registerHandlers(router *gin.Engine, st *store.Store) {
 	router.PATCH("/vulnerabilities/status/:id", func(c *gin.Context) {
 		updateStatus(c, st)
 	})
+}
+
+func listVulnerabilities(c *gin.Context, st *store.Store) {
+	var filter store.VulnerabilityFilter
+	if values, ok := c.GetQueryArray("component"); ok {
+		component := values[0]
+		if component == "" {
+			respondInvalidInput(c)
+			return
+		}
+		filter.Component = component
+	}
+	if value, ok := c.GetQuery("severity"); ok {
+		severity := vuln.Severity(value)
+		if !vuln.ValidSeverity(severity) {
+			respondInvalidInput(c)
+			return
+		}
+		filter.Severity = severity
+	}
+	if value, ok := c.GetQuery("status"); ok {
+		status := vuln.Status(value)
+		if !vuln.ValidStatus(status) {
+			respondInvalidInput(c)
+			return
+		}
+		filter.Status = status
+	}
+
+	page := 1
+	pageSize := 20
+	if value, ok := c.GetQuery("page"); ok {
+		parsed, ok := parsePositiveInt(value)
+		if !ok {
+			respondInvalidInput(c)
+			return
+		}
+		page = parsed
+	}
+	if value, ok := c.GetQuery("page_size"); ok {
+		parsed, ok := parsePositiveInt(value)
+		if !ok || parsed > 100 {
+			respondInvalidInput(c)
+			return
+		}
+		pageSize = parsed
+	}
+
+	items, total, err := st.ListVulnerabilities(c.Request.Context(), filter, page, pageSize)
+	if err != nil {
+		respondStorageError(c)
+		return
+	}
+	c.JSON(http.StatusOK, vulnerabilityListPage{
+		Items:    items,
+		Page:     page,
+		PageSize: pageSize,
+		Total:    total,
+	})
+}
+
+// parsePositiveInt accepts only decimal text made of digits 0-9 with no sign
+// or exponent and whose value is a positive integer.
+func parsePositiveInt(text string) (int, bool) {
+	if text == "" {
+		return 0, false
+	}
+	if len(text) > 1 && text[0] == '0' {
+		return 0, false
+	}
+	value := 0
+	for _, char := range text {
+		if char < '0' || char > '9' {
+			return 0, false
+		}
+		digit := int(char - '0')
+		if value > (int(^uint(0)>>1)-digit)/10 {
+			return 0, false
+		}
+		value = value*10 + digit
+	}
+	if value < 1 {
+		return 0, false
+	}
+	return value, true
 }
 
 func getVulnerability(c *gin.Context, st *store.Store) {
