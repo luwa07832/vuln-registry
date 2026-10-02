@@ -172,3 +172,29 @@ func (v *Vulnerability) MatchedRanges(version Version) []Range {
 	}
 	return matched
 }
+
+// IntersectingRanges returns the affected ranges that share at least one
+// legal version with the closed-or-half-open interval described by the
+// given finite bounds, preserving registration order. Ranges must have been
+// prepared first. Open registered bounds act as unbounded, and intervals
+// meeting only at a shared endpoint intersect only when both sides include
+// that endpoint.
+func (v *Vulnerability) IntersectingRanges(lower, upper Version, lowerInclude, upperInclude bool) []Range {
+	matched := []Range{}
+	for index, affected := range v.Ranges {
+		if affected.Lower != nil {
+			compare := v.lowerParsed[index].Compare(upper)
+			if compare > 0 || (compare == 0 && (!*affected.LowerInclude || !upperInclude)) {
+				continue
+			}
+		}
+		if affected.Upper != nil {
+			compare := lower.Compare(v.upperParsed[index])
+			if compare > 0 || (compare == 0 && (!lowerInclude || !*affected.UpperInclude)) {
+				continue
+			}
+		}
+		matched = append(matched, affected)
+	}
+	return matched
+}

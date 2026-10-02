@@ -121,6 +121,48 @@ go run .
 - 正常请求即使全部无命中也返回 HTTP 200。存储读取失败时返回 HTTP 500 与
   `internal_error` JSON 错误对象，不泄露 SQL、堆栈或文件路径。
 
+### `POST /vulnerabilities/range-match`
+
+按组件版本区间批量检索漏洞，用于判断一段待升级范围涉及哪些已登记漏洞。
+请求体是单个 JSON 对象，`queries` 为非空数组，最多 100 项；每个元素包含：
+
+| 字段 | 要求 |
+|---|---|
+| `component` | 非空组件名，区分大小写精确匹配 |
+| `lower` | 必填的有限下界，合法版本号 |
+| `upper` | 必填的有限上界，合法版本号 |
+| `lower_include` / `upper_include` | 必填布尔值，表示对应边界是否包含 |
+
+`lower` 不得严格大于 `upper`；二者相等时两端都必须为包含。示例：
+
+```json
+{
+  "queries": [
+    {"component": "libxml2", "lower": "2.4", "upper": "2.9", "lower_include": true, "upper_include": false},
+    {"component": "zlib", "lower": "1.2.11", "upper": "1.3", "lower_include": true, "upper_include": true}
+  ]
+}
+```
+
+- 一条漏洞的任一 `affected_ranges` 与查询区间存在至少一个共同合法版本时才命中；
+  登记区间的开放边界视为无界。两个区间只在共同端点相接时，仅当双方都包含
+  该端点才相交（例如登记上界 2.9 为开区间时，查询下界恰为 2.9 且不与该区间
+  在更低版本上重叠，则不命中）。
+- 响应为单个 JSON 对象，`results` 始终为数组且与 `queries` 一一对应、保持
+  输入顺序；每项原样回显 `component`、`lower`、`upper`、`lower_include`、
+  `upper_include`，并带 `vulnerabilities` 数组（无命中时为稳定的 `[]`）。
+- `vulnerabilities` 按编号升序排列，每条只返回 `id`、`component`、
+  `matched_ranges`、`severity`、`fixed_version`、`status`；`matched_ranges`
+  只保留与查询区间相交的受影响区间并保持登记顺序。所有处置状态都参与匹配。
+- 与匹配无关的 JSON 字段忽略。以下任一情况整次请求返回 HTTP 400 与固定纯文本
+  `error=INVALID_INPUT`，且不返回部分结果：请求体不是单个 JSON 对象、
+  `queries` 缺失或不是数组、数组为空或超过 100 项、任一元素不是对象、
+  缺少 `component`、`lower`、`upper`、`lower_include`、`upper_include`、
+  `component` 为空、版本非法、包含标志不是布尔值、下界严格大于上界，或上下界
+  相等却有任一端不包含。
+- 正常请求即使全部无命中也返回 HTTP 200。存储读取失败时返回 HTTP 500 与
+  `internal_error` JSON 错误对象，不泄露 SQL、堆栈或文件路径。
+
 ### `GET /vulnerabilities/:id`
 
 按编号取回单条漏洞的完整登记内容，路径中的 `id` 与登记编号精确匹配

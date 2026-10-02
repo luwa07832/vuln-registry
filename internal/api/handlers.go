@@ -19,6 +19,7 @@ const (
 	codeNotFound     = "VULNERABILITY_NOT_FOUND"
 
 	matchMaxComponents = 100
+	rangeMatchMaxItems = 100
 )
 
 // rangeRequest is the affected-range payload of a registration.
@@ -61,6 +62,31 @@ type matchVulnerabilitiesResponse struct {
 	Results []matchComponentResult `json:"results"`
 }
 
+type rangeMatchQuery struct {
+	Component    string `json:"component"`
+	Lower        string `json:"lower"`
+	Upper        string `json:"upper"`
+	LowerInclude *bool  `json:"lower_include"`
+	UpperInclude *bool  `json:"upper_include"`
+}
+
+type rangeMatchRequest struct {
+	Queries []rangeMatchQuery `json:"queries"`
+}
+
+type rangeMatchResult struct {
+	Component       string                  `json:"component"`
+	Lower           string                  `json:"lower"`
+	Upper           string                  `json:"upper"`
+	LowerInclude    bool                    `json:"lower_include"`
+	UpperInclude    bool                    `json:"upper_include"`
+	Vulnerabilities []affectedVulnerability `json:"vulnerabilities"`
+}
+
+type rangeMatchResponse struct {
+	Results []rangeMatchResult `json:"results"`
+}
+
 // listVulnerabilitiesResponse is the paginated list payload; items carries
 // the full records of the requested page.
 type listVulnerabilitiesResponse struct {
@@ -93,6 +119,9 @@ func registerHandlers(router *gin.Engine, st *store.Store) {
 	})
 	router.POST("/vulnerabilities/match", func(c *gin.Context) {
 		matchVulnerabilities(c, st)
+	})
+	router.POST("/vulnerabilities/range-match", func(c *gin.Context) {
+		matchByRange(c, st)
 	})
 	router.GET("/vulnerabilities/:id", func(c *gin.Context) {
 		getVulnerability(c, st)
@@ -262,6 +291,96 @@ func matchVulnerabilities(c *gin.Context, st *store.Store) {
 		}
 	}
 	c.JSON(http.StatusOK, matchVulnerabilitiesResponse{Results: results})
+}
+
+// matchByRange evaluates a batch of component version intervals against the
+// registered affected ranges. Every query carries finite bounds; a record
+// hits when one of its affected ranges shares at least one legal version
+// with the query interval. Results mirror the input order and hits are id
+// sorted; entries without hits carry an empty array.
+func matchByRange(c *gin.Context, st *store.Store) {
+	var request rangeMatchRequest
+	if err := decodeBody(c, &request); err != nil {
+		respondInvalidInput(c)
+		return
+	}
+	if len(request.Queries) == 0 || len(request.Queries) > rangeMatchMaxItems {
+		respondInvalidInput(c)
+		return
+	}
+
+	type parsedQuery struct {
+		query        rangeMatchQuery
+		lower, upper vuln.Version
+		lowerInclude bool
+		upperInclude bool
+	}
+	queries := make([]parsedQuery, len(request.Queries))
+	for index, item := range request.Queries {
+		if item.Component == "" || item.Lower == "" || item.Upper == "" ||
+			item.LowerInclude == nil || item.UpperInclude == nil {
+			respondInvalidInput(c)
+			return
+		}
+		lower, err := vuln.ParseVersion(item.Lower)
+		if err != nil {
+			respondInvalidInput(c)
+			return
+		}
+		upper, err := vuln.ParseVersion(item.Upper)
+		if err != nil {
+			respondInvalidInput(c)
+			return
+		}
+		if lower.Compare(upper) > 0 {
+			respondInvalidInput(c)
+			return
+		}
+		if lower.Compare(upper) == 0 && (!*item.LowerInclude || !*item.UpperInclude) {
+			respondInvalidInput(c)
+			return
+		}
+		queries[index] = parsedQuery{
+			query:        item,
+			lower:        lower,
+			upper:        upper,
+			lowerInclude: *item.LowerInclude,
+			upperInclude: *item.UpperInclude,
+		}
+	}
+
+	results := make([]rangeMatchResult, len(queries))
+	for index, item := range queries {
+		records, err := st.ListByComponent(c.Request.Context(), item.query.Component)
+		if err != nil {
+			respondStorageError(c)
+			return
+		}
+		hits := []affectedVulnerability{}
+		for _, record := range records {
+			matched := record.IntersectingRanges(item.lower, item.upper, item.lowerInclude, item.upperInclude)
+			if len(matched) == 0 {
+				continue
+			}
+			hits = append(hits, affectedVulnerability{
+				ID:            record.ID,
+				Component:     record.Component,
+				MatchedRanges: matched,
+				Severity:      record.Severity,
+				FixedVersion:  record.FixedVersion,
+				Status:        record.Status,
+			})
+		}
+		results[index] = rangeMatchResult{
+			Component:       item.query.Component,
+			Lower:           item.query.Lower,
+			Upper:           item.query.Upper,
+			LowerInclude:    item.lowerInclude,
+			UpperInclude:    item.upperInclude,
+			Vulnerabilities: hits,
+		}
+	}
+	c.JSON(http.StatusOK, rangeMatchResponse{Results: results})
 }
 
 func updateStatus(c *gin.Context, st *store.Store) {

@@ -138,3 +138,64 @@ func mustParse(t *testing.T, value string) Version {
 	}
 	return parsed
 }
+
+func TestIntersectingRanges(t *testing.T) {
+	record := &Vulnerability{Ranges: []Range{
+		// open lower, exclusive upper 2.0
+		{Upper: ptrText("2.0"), UpperInclude: ptrBool(false)},
+		// inclusive 3.0 to inclusive 4.0
+		{Lower: ptrText("3.0"), LowerInclude: ptrBool(true), Upper: ptrText("4.0"), UpperInclude: ptrBool(true)},
+		// inclusive lower 5.0, open upper
+		{Lower: ptrText("5.0"), LowerInclude: ptrBool(true)},
+	}}
+	if err := record.PrepareRanges(); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+
+	match := func(lower, upper string, lowerInclude, upperInclude bool) []Range {
+		return record.IntersectingRanges(mustParse(t, lower), mustParse(t, upper), lowerInclude, upperInclude)
+	}
+
+	if matched := match("1.0", "1.5", true, true); len(matched) != 1 || matched[0].Lower != nil {
+		t.Fatalf("1.0..1.5 matched %#v, want only open-lower range", matched)
+	}
+	// Query touching the exclusive registered upper only at 2.0 must not hit.
+	if matched := match("2.0", "2.5", true, true); len(matched) != 0 {
+		t.Fatalf("2.0..2.5 matched %#v, want none at excluded endpoint", matched)
+	}
+	// An exclusive query bound at a shared included registered endpoint misses
+	// when that endpoint is the only common version; an overlap below an
+	// excluded registered upper still intersects.
+	if matched := match("4.0", "4.5", false, true); len(matched) != 0 {
+		t.Fatalf("(4.0..4.5] matched %#v, want none at excluded query endpoint", matched)
+	}
+	if matched := match("1.5", "2.0", true, false); len(matched) != 1 {
+		t.Fatalf("1.5..<2.0 matched %#v, want shared interior overlap", matched)
+	}
+	// Gap between 2.0 (exclusive) and 3.0 yields no shared version.
+	if matched := match("2.0", "2.5", false, true); len(matched) != 0 {
+		t.Fatalf("(2.0..2.5] matched %#v, want none in gap", matched)
+	}
+	// Shared inclusive endpoint 3.0 intersects when both include it.
+	if matched := match("2.5", "3.0", true, true); len(matched) != 1 || matched[0].Lower == nil {
+		t.Fatalf("2.5..3.0 matched %#v, want only inclusive range", matched)
+	}
+	// Query inside the bounded range intersects only that range.
+	if matched := match("3.5", "3.8", false, false); len(matched) != 1 || matched[0].Lower == nil {
+		t.Fatalf("3.5..3.8 matched %#v, want only bounded range", matched)
+	}
+	// A wide query overlaps every registered range.
+	if matched := match("1.0", "9.0", true, true); len(matched) != 3 {
+		t.Fatalf("1.0..9.0 matched %d ranges, want 3", len(matched))
+	}
+	// Single-version queries at included and excluded endpoints.
+	if matched := match("4.0", "4.0", true, true); len(matched) != 1 {
+		t.Fatalf("[4.0] matched %#v, want bounded range", matched)
+	}
+	if matched := match("5.0", "5.0", true, true); len(matched) != 1 {
+		t.Fatalf("[5.0] matched %#v, want open-upper range", matched)
+	}
+	if matched := match("4.5", "4.9", true, true); len(matched) != 0 {
+		t.Fatalf("4.5..4.9 matched %#v, want none in gap", matched)
+	}
+}
