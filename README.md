@@ -90,6 +90,32 @@ go run .
 - 组件为空或版本非法时返回 HTTP 400 与 `error=INVALID_INPUT`。
 - 合法但无结果时返回 HTTP 200，响应体为稳定的空数组 `[]`。
 
+### `POST /vulnerabilities/match`
+
+批量按依赖清单匹配受影响漏洞。请求体是单个 JSON 对象，`components` 为非空数组、
+最多 100 项，每个元素包含非空字符串 `component` 与合法版本 `version`；与匹配
+无关的字段一律忽略。匹配口径与 `GET /vulnerabilities/affected` 完全相同：组件
+区分大小写精确匹配，版本按点分十进制数字段比较、缺失尾段视为零，版本落入任一
+`affected_ranges` 即命中，处置状态不参与排除。
+
+成功返回 HTTP 200 与单个 JSON 对象，`results` 始终为数组并与输入一一对应、顺序
+一致，重复的组件版本分别处理、不合并：
+
+```json
+{"results":[{"component":"libxml2","version":"2.4.1","vulnerabilities":[{"id":"CVE-2024-0001","component":"libxml2","matched_ranges":[{"lower":"2.0","lower_include":true,"upper":"2.9","upper_include":false}],"severity":"high","fixed_version":"2.10.0","status":"open"}]}]}
+```
+
+每个结果对象原样回显 `component` 与 `version`，`vulnerabilities` 数组按编号升序
+排列，每条只包含 `id`、`component`、`matched_ranges`、`severity`、
+`fixed_version`、`status`；`matched_ranges` 只保留本次实际命中的区间并保持登记
+顺序，无命中时为空数组 `[]`。
+
+请求体不是单个 JSON 对象、`components` 缺失或不是数组、数组为空或超过 100 项、
+任一元素不是对象、`component` 缺失或为空、`version` 缺失、为空或不是合法版本时，
+整次请求统一返回 HTTP 400 与纯文本 `error=INVALID_INPUT`，不返回部分结果。
+存储读取失败时返回 HTTP 500 与 `internal_error` JSON 错误对象，不泄露 SQL、
+堆栈或文件路径。
+
 ### `GET /vulnerabilities/:id`
 
 按编号取回单条漏洞的完整登记内容，路径中的 `id` 与登记编号精确匹配

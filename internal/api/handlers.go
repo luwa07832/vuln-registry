@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -40,6 +41,29 @@ type updateStatusRequest struct {
 	Status string `json:"status"`
 }
 
+// matchComponentRequest is one entry of a batch match manifest.
+type matchComponentRequest struct {
+	Component string `json:"component"`
+	Version   string `json:"version"`
+}
+
+// matchVulnerabilitiesRequest is the batch match payload.
+type matchVulnerabilitiesRequest struct {
+	Components []json.RawMessage `json:"components"`
+}
+
+// matchComponentResult is the per-input projection of the batch match.
+type matchComponentResult struct {
+	Component       string                  `json:"component"`
+	Version         string                  `json:"version"`
+	Vulnerabilities []affectedVulnerability `json:"vulnerabilities"`
+}
+
+// matchVulnerabilitiesResponse wraps the results in input order.
+type matchVulnerabilitiesResponse struct {
+	Results []matchComponentResult `json:"results"`
+}
+
 // listVulnerabilitiesResponse is the paginated list payload; items carries
 // the full records of the requested page.
 type listVulnerabilitiesResponse struct {
@@ -69,6 +93,9 @@ func registerHandlers(router *gin.Engine, st *store.Store) {
 	})
 	router.GET("/vulnerabilities/affected", func(c *gin.Context) {
 		queryAffected(c, st)
+	})
+	router.POST("/vulnerabilities/match", func(c *gin.Context) {
+		matchVulnerabilities(c, st)
 	})
 	router.GET("/vulnerabilities/:id", func(c *gin.Context) {
 		getVulnerability(c, st)
@@ -180,6 +207,81 @@ func queryAffected(c *gin.Context, st *store.Store) {
 		})
 	}
 	c.JSON(http.StatusOK, results)
+}
+
+// matchVulnerabilities serves the batch manifest entry: every input component
+// and version is matched independently against the registered affected
+// ranges. Validation of the whole manifest precedes any storage read, so a
+// bad entry rejects the request instead of returning partial results.
+func matchVulnerabilities(c *gin.Context, st *store.Store) {
+	var request matchVulnerabilitiesRequest
+	if err := decodeBody(c, &request); err != nil {
+		respondInvalidInput(c)
+		return
+	}
+	if request.Components == nil || len(request.Components) == 0 || len(request.Components) > 100 {
+		respondInvalidInput(c)
+		return
+	}
+
+	entries := make([]matchComponentRequest, len(request.Components))
+	versions := make([]vuln.Version, len(request.Components))
+	for index, raw := range request.Components {
+		if len(bytes.TrimSpace(raw)) == 0 {
+			respondInvalidInput(c)
+			return
+		}
+		var entry matchComponentRequest
+		if err := json.Unmarshal(raw, &entry); err != nil {
+			respondInvalidInput(c)
+			return
+		}
+		version, err := vuln.ParseVersion(entry.Version)
+		if entry.Component == "" || err != nil {
+			respondInvalidInput(c)
+			return
+		}
+		entries[index] = entry
+		versions[index] = version
+	}
+
+	recordsByComponent := map[string][]*vuln.Vulnerability{}
+	for _, entry := range entries {
+		if _, queried := recordsByComponent[entry.Component]; queried {
+			continue
+		}
+		records, err := st.ListByComponent(c.Request.Context(), entry.Component)
+		if err != nil {
+			respondStorageError(c)
+			return
+		}
+		recordsByComponent[entry.Component] = records
+	}
+
+	results := make([]matchComponentResult, len(entries))
+	for index, entry := range entries {
+		hits := []affectedVulnerability{}
+		for _, record := range recordsByComponent[entry.Component] {
+			matched := record.MatchedRanges(versions[index])
+			if len(matched) == 0 {
+				continue
+			}
+			hits = append(hits, affectedVulnerability{
+				ID:            record.ID,
+				Component:     record.Component,
+				MatchedRanges: matched,
+				Severity:      record.Severity,
+				FixedVersion:  record.FixedVersion,
+				Status:        record.Status,
+			})
+		}
+		results[index] = matchComponentResult{
+			Component:       entry.Component,
+			Version:         entry.Version,
+			Vulnerabilities: hits,
+		}
+	}
+	c.JSON(http.StatusOK, matchVulnerabilitiesResponse{Results: results})
 }
 
 func updateStatus(c *gin.Context, st *store.Store) {
