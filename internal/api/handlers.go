@@ -17,6 +17,8 @@ const (
 	codeInvalidInput = "INVALID_INPUT"
 	codeDuplicate    = "DUPLICATE_VULNERABILITY"
 	codeNotFound     = "VULNERABILITY_NOT_FOUND"
+
+	matchMaxComponents = 100
 )
 
 // rangeRequest is the affected-range payload of a registration.
@@ -38,6 +40,25 @@ type createVulnerabilityRequest struct {
 
 type updateStatusRequest struct {
 	Status string `json:"status"`
+}
+
+type matchComponentRequest struct {
+	Component string `json:"component"`
+	Version   string `json:"version"`
+}
+
+type matchVulnerabilitiesRequest struct {
+	Components []matchComponentRequest `json:"components"`
+}
+
+type matchComponentResult struct {
+	Component       string                  `json:"component"`
+	Version         string                  `json:"version"`
+	Vulnerabilities []affectedVulnerability `json:"vulnerabilities"`
+}
+
+type matchVulnerabilitiesResponse struct {
+	Results []matchComponentResult `json:"results"`
 }
 
 // listVulnerabilitiesResponse is the paginated list payload; items carries
@@ -69,6 +90,9 @@ func registerHandlers(router *gin.Engine, st *store.Store) {
 	})
 	router.GET("/vulnerabilities/affected", func(c *gin.Context) {
 		queryAffected(c, st)
+	})
+	router.POST("/vulnerabilities/match", func(c *gin.Context) {
+		matchVulnerabilities(c, st)
 	})
 	router.GET("/vulnerabilities/:id", func(c *gin.Context) {
 		getVulnerability(c, st)
@@ -180,6 +204,64 @@ func queryAffected(c *gin.Context, st *store.Store) {
 		})
 	}
 	c.JSON(http.StatusOK, results)
+}
+
+// matchVulnerabilities evaluates a batch of component versions against the
+// registered affected ranges. Results mirror the input order; duplicates are
+// handled independently and entries without hits carry an empty array.
+func matchVulnerabilities(c *gin.Context, st *store.Store) {
+	var request matchVulnerabilitiesRequest
+	if err := decodeBody(c, &request); err != nil {
+		respondInvalidInput(c)
+		return
+	}
+	if len(request.Components) == 0 || len(request.Components) > matchMaxComponents {
+		respondInvalidInput(c)
+		return
+	}
+	parsedVersions := make([]vuln.Version, len(request.Components))
+	for index, item := range request.Components {
+		if item.Component == "" {
+			respondInvalidInput(c)
+			return
+		}
+		parsed, err := vuln.ParseVersion(item.Version)
+		if err != nil {
+			respondInvalidInput(c)
+			return
+		}
+		parsedVersions[index] = parsed
+	}
+
+	results := make([]matchComponentResult, len(request.Components))
+	for index, item := range request.Components {
+		records, err := st.ListByComponent(c.Request.Context(), item.Component)
+		if err != nil {
+			respondStorageError(c)
+			return
+		}
+		hits := []affectedVulnerability{}
+		for _, record := range records {
+			matched := record.MatchedRanges(parsedVersions[index])
+			if len(matched) == 0 {
+				continue
+			}
+			hits = append(hits, affectedVulnerability{
+				ID:            record.ID,
+				Component:     record.Component,
+				MatchedRanges: matched,
+				Severity:      record.Severity,
+				FixedVersion:  record.FixedVersion,
+				Status:        record.Status,
+			})
+		}
+		results[index] = matchComponentResult{
+			Component:       item.Component,
+			Version:         item.Version,
+			Vulnerabilities: hits,
+		}
+	}
+	c.JSON(http.StatusOK, matchVulnerabilitiesResponse{Results: results})
 }
 
 func updateStatus(c *gin.Context, st *store.Store) {
