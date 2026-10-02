@@ -18,8 +18,9 @@ const (
 	codeDuplicate    = "DUPLICATE_VULNERABILITY"
 	codeNotFound     = "VULNERABILITY_NOT_FOUND"
 
-	matchMaxComponents = 100
-	rangeMatchMaxItems = 100
+	matchMaxComponents  = 100
+	rangeMatchMaxItems  = 100
+	createBatchMaxItems = 100
 )
 
 // rangeRequest is the affected-range payload of a registration.
@@ -37,6 +38,15 @@ type createVulnerabilityRequest struct {
 	Severity     string         `json:"severity"`
 	FixedVersion string         `json:"fixed_version"`
 	Status       string         `json:"status"`
+}
+
+type createVulnerabilitiesBatchRequest struct {
+	Vulnerabilities []createVulnerabilityRequest `json:"vulnerabilities"`
+}
+
+type createVulnerabilitiesBatchResponse struct {
+	Items []*vuln.Vulnerability `json:"items"`
+	Count int                   `json:"count"`
 }
 
 type updateStatusRequest struct {
@@ -111,6 +121,9 @@ func registerHandlers(router *gin.Engine, st *store.Store) {
 	router.POST("/vulnerabilities", func(c *gin.Context) {
 		createVulnerability(c, st)
 	})
+	router.POST("/vulnerabilities/batch", func(c *gin.Context) {
+		createVulnerabilitiesBatch(c, st)
+	})
 	router.GET("/vulnerabilities", func(c *gin.Context) {
 		listVulnerabilities(c, st)
 	})
@@ -151,19 +164,86 @@ func createVulnerability(c *gin.Context, st *store.Store) {
 		return
 	}
 
-	if request.ID == "" || request.Component == "" || request.FixedVersion == "" {
+	record, ok := buildVulnerabilityRecord(request)
+	if !ok {
 		respondInvalidInput(c)
 		return
 	}
-	if _, err := vuln.ParseVersion(request.FixedVersion); err != nil {
+
+	if err := st.CreateVulnerability(c.Request.Context(), record); err != nil {
+		if errors.Is(err, store.ErrDuplicateVulnerability) {
+			respondFixed(c, http.StatusConflict, codeDuplicate)
+			return
+		}
+		respondStorageError(c)
+		return
+	}
+	c.JSON(http.StatusCreated, record)
+}
+
+// createVulnerabilitiesBatch atomically registers 1 to 100 records. Every
+// input is validated first; only records that are individually valid are
+// checked for duplicate ids, so invalid input alongside a duplicate id still
+// answers INVALID_INPUT. The store writes every record in one transaction, so
+// no partial commit survives any failure.
+func createVulnerabilitiesBatch(c *gin.Context, st *store.Store) {
+	var request createVulnerabilitiesBatchRequest
+	if err := decodeBody(c, &request); err != nil {
 		respondInvalidInput(c)
 		return
+	}
+	if len(request.Vulnerabilities) == 0 || len(request.Vulnerabilities) > createBatchMaxItems {
+		respondInvalidInput(c)
+		return
+	}
+
+	records := make([]*vuln.Vulnerability, 0, len(request.Vulnerabilities))
+	for _, item := range request.Vulnerabilities {
+		record, ok := buildVulnerabilityRecord(item)
+		if !ok {
+			respondInvalidInput(c)
+			return
+		}
+		records = append(records, record)
+	}
+
+	seen := make(map[string]struct{}, len(records))
+	for _, record := range records {
+		if _, duplicate := seen[record.ID]; duplicate {
+			respondFixed(c, http.StatusConflict, codeDuplicate)
+			return
+		}
+		seen[record.ID] = struct{}{}
+	}
+
+	if err := st.CreateVulnerabilities(c.Request.Context(), records); err != nil {
+		if errors.Is(err, store.ErrDuplicateVulnerability) {
+			respondFixed(c, http.StatusConflict, codeDuplicate)
+			return
+		}
+		respondStorageError(c)
+		return
+	}
+	c.JSON(http.StatusCreated, createVulnerabilitiesBatchResponse{
+		Items: records,
+		Count: len(records),
+	})
+}
+
+// buildVulnerabilityRecord validates one registration payload exactly like
+// the single-entry handler and normalizes its bounds and ranges. It returns
+// ok=false for every condition the public contract maps to INVALID_INPUT.
+func buildVulnerabilityRecord(request createVulnerabilityRequest) (*vuln.Vulnerability, bool) {
+	if request.ID == "" || request.Component == "" || request.FixedVersion == "" {
+		return nil, false
+	}
+	if _, err := vuln.ParseVersion(request.FixedVersion); err != nil {
+		return nil, false
 	}
 	severity := vuln.Severity(request.Severity)
 	status := vuln.Status(request.Status)
 	if !vuln.ValidSeverity(severity) || !vuln.ValidStatus(status) || len(request.Ranges) == 0 {
-		respondInvalidInput(c)
-		return
+		return nil, false
 	}
 
 	record := &vuln.Vulnerability{
@@ -183,19 +263,9 @@ func createVulnerability(c *gin.Context, st *store.Store) {
 		})
 	}
 	if err := record.PrepareRanges(); err != nil {
-		respondInvalidInput(c)
-		return
+		return nil, false
 	}
-
-	if err := st.CreateVulnerability(c.Request.Context(), record); err != nil {
-		if errors.Is(err, store.ErrDuplicateVulnerability) {
-			respondFixed(c, http.StatusConflict, codeDuplicate)
-			return
-		}
-		respondStorageError(c)
-		return
-	}
-	c.JSON(http.StatusCreated, record)
+	return record, true
 }
 
 func queryAffected(c *gin.Context, st *store.Store) {

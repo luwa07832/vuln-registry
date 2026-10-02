@@ -60,6 +60,49 @@ func (s *Store) CreateVulnerability(ctx context.Context, vulnerability *vuln.Vul
 	}
 	defer tx.Rollback()
 
+	if err := insertVulnerabilityTx(ctx, tx, vulnerability); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		if isUniqueViolation(err) {
+			return ErrDuplicateVulnerability
+		}
+		return fmt.Errorf("commit create: %w", err)
+	}
+	return nil
+}
+
+// CreateVulnerabilities inserts every record and all of their affected ranges
+// in a single transaction: either all records are written or none is. Input
+// validation and intra-batch duplicate detection belong to the caller; this
+// method still rejects an id that already exists in the database.
+func (s *Store) CreateVulnerabilities(ctx context.Context, vulnerabilities []*vuln.Vulnerability) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin create: %w", err)
+	}
+	defer tx.Rollback()
+
+	for _, vulnerability := range vulnerabilities {
+		if err := insertVulnerabilityTx(ctx, tx, vulnerability); err != nil {
+			return err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		if isUniqueViolation(err) {
+			return ErrDuplicateVulnerability
+		}
+		return fmt.Errorf("commit create: %w", err)
+	}
+	return nil
+}
+
+// insertVulnerabilityTx inserts one record with all of its affected ranges
+// into the open transaction, returning ErrDuplicateVulnerability when the id
+// is already stored.
+func insertVulnerabilityTx(ctx context.Context, tx *sql.Tx, vulnerability *vuln.Vulnerability) error {
 	var existing int
 	switch err := tx.QueryRowContext(ctx,
 		"SELECT 1 FROM vulnerabilities WHERE id = ?", vulnerability.ID,
@@ -100,13 +143,6 @@ func (s *Store) CreateVulnerability(ctx context.Context, vulnerability *vuln.Vul
 		); err != nil {
 			return fmt.Errorf("insert affected range: %w", err)
 		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		if isUniqueViolation(err) {
-			return ErrDuplicateVulnerability
-		}
-		return fmt.Errorf("commit create: %w", err)
 	}
 	return nil
 }
