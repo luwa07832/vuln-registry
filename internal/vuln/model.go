@@ -97,6 +97,44 @@ type Vulnerability struct {
 	upperParsed  []Version `json:"-"`
 }
 
+// IntervalQuery is a finite, closed-or-open version interval supplied by a
+// range-match request. Both bounds are present; the include flags state
+// whether each endpoint belongs to the interval.
+type IntervalQuery struct {
+	Lower        Version
+	Upper        Version
+	LowerInclude bool
+	UpperInclude bool
+}
+
+// NewIntervalQuery parses and validates one finite interval: both bounds must
+// be legal versions, lower must not exceed upper, and equal bounds require
+// both ends to be inclusive.
+func NewIntervalQuery(lowerText, upperText string, lowerInclude, upperInclude bool) (IntervalQuery, error) {
+	lower, err := ParseVersion(lowerText)
+	if err != nil {
+		return IntervalQuery{}, err
+	}
+	upper, err := ParseVersion(upperText)
+	if err != nil {
+		return IntervalQuery{}, err
+	}
+	switch lower.Compare(upper) {
+	case 1:
+		return IntervalQuery{}, errInvalidVersion
+	case 0:
+		if !lowerInclude || !upperInclude {
+			return IntervalQuery{}, errInvalidVersion
+		}
+	}
+	return IntervalQuery{
+		Lower:        lower,
+		Upper:        upper,
+		LowerInclude: lowerInclude,
+		UpperInclude: upperInclude,
+	}, nil
+}
+
 // PrepareRanges parses every bound and rejects malformed versions or inverted
 // intervals. On success the parsed bounds are cached for Contains and
 // MatchedRanges. Stored records are already valid, so the same call prepares
@@ -165,6 +203,30 @@ func (v *Vulnerability) MatchedRanges(version Version) []Range {
 		if upper := affected.UpperText(); upper != "" {
 			compare := version.Compare(v.upperParsed[index])
 			if compare > 0 || (compare == 0 && !*affected.UpperInclude) {
+				continue
+			}
+		}
+		matched = append(matched, affected)
+	}
+	return matched
+}
+
+// MatchedRangesInInterval returns the affected ranges that share at least one
+// legal version with query, preserving registration order. A registered open
+// bound is treated as unbounded; ranges only touch at a shared endpoint when
+// both sides include it. Ranges must have been prepared first.
+func (v *Vulnerability) MatchedRangesInInterval(query IntervalQuery) []Range {
+	matched := []Range{}
+	for index, affected := range v.Ranges {
+		if text := affected.LowerText(); text != "" {
+			compare := v.lowerParsed[index].Compare(query.Upper)
+			if compare > 0 || (compare == 0 && (!*affected.LowerInclude || !query.UpperInclude)) {
+				continue
+			}
+		}
+		if text := affected.UpperText(); text != "" {
+			compare := query.Lower.Compare(v.upperParsed[index])
+			if compare > 0 || (compare == 0 && (!query.LowerInclude || !*affected.UpperInclude)) {
 				continue
 			}
 		}

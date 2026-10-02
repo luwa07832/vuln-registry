@@ -51,6 +51,20 @@ type matchVulnerabilitiesRequest struct {
 	Components []matchComponentRequest `json:"components"`
 }
 
+// rangeMatchQuery is one finite version interval of a range-match request.
+// The pointers distinguish a missing field from a present JSON value.
+type rangeMatchQuery struct {
+	Component    string `json:"component"`
+	Lower        string `json:"lower"`
+	Upper        string `json:"upper"`
+	LowerInclude *bool  `json:"lower_include"`
+	UpperInclude *bool  `json:"upper_include"`
+}
+
+type rangeMatchRequest struct {
+	Queries []rangeMatchQuery `json:"queries"`
+}
+
 type matchComponentResult struct {
 	Component       string                  `json:"component"`
 	Version         string                  `json:"version"`
@@ -59,6 +73,19 @@ type matchComponentResult struct {
 
 type matchVulnerabilitiesResponse struct {
 	Results []matchComponentResult `json:"results"`
+}
+
+type rangeMatchResult struct {
+	Component       string                  `json:"component"`
+	Lower           string                  `json:"lower"`
+	Upper           string                  `json:"upper"`
+	LowerInclude    bool                    `json:"lower_include"`
+	UpperInclude    bool                    `json:"upper_include"`
+	Vulnerabilities []affectedVulnerability `json:"vulnerabilities"`
+}
+
+type rangeMatchResponse struct {
+	Results []rangeMatchResult `json:"results"`
 }
 
 // listVulnerabilitiesResponse is the paginated list payload; items carries
@@ -93,6 +120,9 @@ func registerHandlers(router *gin.Engine, st *store.Store) {
 	})
 	router.POST("/vulnerabilities/match", func(c *gin.Context) {
 		matchVulnerabilities(c, st)
+	})
+	router.POST("/vulnerabilities/range-match", func(c *gin.Context) {
+		matchRanges(c, st)
 	})
 	router.GET("/vulnerabilities/:id", func(c *gin.Context) {
 		getVulnerability(c, st)
@@ -262,6 +292,67 @@ func matchVulnerabilities(c *gin.Context, st *store.Store) {
 		}
 	}
 	c.JSON(http.StatusOK, matchVulnerabilitiesResponse{Results: results})
+}
+
+// matchRanges evaluates a batch of finite version intervals against the
+// registered affected ranges. Results mirror the input order; every status
+// participates and entries without hits carry an empty array.
+func matchRanges(c *gin.Context, st *store.Store) {
+	var request rangeMatchRequest
+	if err := decodeBody(c, &request); err != nil {
+		respondInvalidInput(c)
+		return
+	}
+	if len(request.Queries) == 0 || len(request.Queries) > matchMaxComponents {
+		respondInvalidInput(c)
+		return
+	}
+	intervals := make([]vuln.IntervalQuery, len(request.Queries))
+	for index, item := range request.Queries {
+		if item.Component == "" || item.LowerInclude == nil || item.UpperInclude == nil {
+			respondInvalidInput(c)
+			return
+		}
+		interval, err := vuln.NewIntervalQuery(item.Lower, item.Upper, *item.LowerInclude, *item.UpperInclude)
+		if err != nil {
+			respondInvalidInput(c)
+			return
+		}
+		intervals[index] = interval
+	}
+
+	results := make([]rangeMatchResult, len(request.Queries))
+	for index, item := range request.Queries {
+		records, err := st.ListByComponent(c.Request.Context(), item.Component)
+		if err != nil {
+			respondStorageError(c)
+			return
+		}
+		hits := []affectedVulnerability{}
+		for _, record := range records {
+			matched := record.MatchedRangesInInterval(intervals[index])
+			if len(matched) == 0 {
+				continue
+			}
+			hits = append(hits, affectedVulnerability{
+				ID:            record.ID,
+				Component:     record.Component,
+				MatchedRanges: matched,
+				Severity:      record.Severity,
+				FixedVersion:  record.FixedVersion,
+				Status:        record.Status,
+			})
+		}
+		results[index] = rangeMatchResult{
+			Component:       item.Component,
+			Lower:           item.Lower,
+			Upper:           item.Upper,
+			LowerInclude:    *item.LowerInclude,
+			UpperInclude:    *item.UpperInclude,
+			Vulnerabilities: hits,
+		}
+	}
+	c.JSON(http.StatusOK, rangeMatchResponse{Results: results})
 }
 
 func updateStatus(c *gin.Context, st *store.Store) {

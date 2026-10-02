@@ -138,3 +138,82 @@ func mustParse(t *testing.T, value string) Version {
 	}
 	return parsed
 }
+
+func TestNewIntervalQueryValidatesBounds(t *testing.T) {
+	if query, err := NewIntervalQuery("1.0", "1.0.0", true, true); err != nil || query.Lower.Compare(query.Upper) != 0 {
+		t.Fatalf("equal numeric bounds should be legal: %v %v", query, err)
+	}
+	bad := []struct {
+		lower, upper string
+		lowerInclude bool
+		upperInclude bool
+	}{
+		{"", "1.0", true, true},
+		{"1.x", "1.0", true, true},
+		{"1.0", "", true, true},
+		{"2.0", "1.0", true, true},
+		{"1.0", "1.0", false, true},
+		{"1.0", "1.0", true, false},
+	}
+	for _, tc := range bad {
+		if _, err := NewIntervalQuery(tc.lower, tc.upper, tc.lowerInclude, tc.upperInclude); err == nil {
+			t.Fatalf("NewIntervalQuery(%+v) succeeded, want error", tc)
+		}
+	}
+}
+
+func TestMatchedRangesInIntervalSemantics(t *testing.T) {
+	record := &Vulnerability{Ranges: []Range{
+		{Lower: ptrText("1.0"), LowerInclude: ptrBool(false), Upper: ptrText("2.0"), UpperInclude: ptrBool(true)},
+		{Upper: ptrText("3.0"), UpperInclude: ptrBool(false)},
+		{Lower: ptrText("4.0"), LowerInclude: ptrBool(true)},
+	}}
+	if err := record.PrepareRanges(); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+
+	query := func(lower, upper string, lowerInclude, upperInclude bool) IntervalQuery {
+		parsed, err := NewIntervalQuery(lower, upper, lowerInclude, upperInclude)
+		if err != nil {
+			t.Fatalf("query %s..%s: %v", lower, upper, err)
+		}
+		return parsed
+	}
+	indices := func(matched []Range) []int {
+		got := []int{}
+		for _, hit := range matched {
+			for index, candidate := range record.Ranges {
+				if candidate == hit {
+					got = append(got, index)
+				}
+			}
+		}
+		return got
+	}
+
+	cases := []struct {
+		name           string
+		query          IntervalQuery
+		wantRangeIndex []int
+	}{
+		{"open overlap below excluded lower", query("0", "1.0", true, true), []int{1}},
+		{"shared included upper endpoint", query("2.0", "2.5", true, true), []int{0, 1}},
+		{"query excludes shared endpoint", query("2.0", "2.5", false, true), []int{1}},
+		{"gap between exclusive endpoints", query("3.0", "3.5", true, true), nil},
+		{"shared included lower endpoint", query("3.5", "4.0", true, true), []int{2}},
+		{"range excludes shared upper endpoint", query("3.5", "3.9", true, true), nil},
+		{"open upper side extends forever", query("5.0", "6.0", true, true), []int{2}},
+		{"wide query covers everything", query("0", "9.0", true, false), []int{0, 1, 2}},
+	}
+	for _, tc := range cases {
+		got := indices(record.MatchedRangesInInterval(tc.query))
+		if len(got) != len(tc.wantRangeIndex) {
+			t.Fatalf("%s: matched indices %v, want %v", tc.name, got, tc.wantRangeIndex)
+		}
+		for index := range got {
+			if got[index] != tc.wantRangeIndex[index] {
+				t.Fatalf("%s: matched indices %v, want %v", tc.name, got, tc.wantRangeIndex)
+			}
+		}
+	}
+}
