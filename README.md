@@ -204,6 +204,31 @@ JSON 语义，开放边界对应字段为 `null`。
 该入口为只读操作；存储读取失败时返回 HTTP 500，沿用 `{"error":...}` 的
 JSON 错误对象格式。
 
+### `PUT /vulnerabilities/:id`
+
+完整修正一条已有漏洞，让登记写错后不必更换编号。路径中的 `id` 与登记编号精确
+匹配（区分大小写，不做去空格或模糊匹配），编号只由路径决定；请求体中的 `id`
+与任何无关字段一律忽略。请求体是单个 JSON 对象，包含 `component`、
+`affected_ranges`、`severity`、`fixed_version`、`status`，字段含义、必填条件、
+版本与区间语义、严重等级与处置状态取值与 `POST /vulnerabilities` 完全一致。
+
+成功返回 HTTP 200 与包含 `id`、`component`、`affected_ranges`、`severity`、
+`fixed_version`、`status` 的完整记录；`affected_ranges` 保持请求顺序，开放边界
+字段为 `null`。
+
+以下任一情况返回 HTTP 400 与固定纯文本 `error=INVALID_INPUT`：请求体不是单个
+JSON 对象、解析失败、字段缺失或为空、`affected_ranges` 为空或含非法区间、版本
+或边界包含标志非法、区间反向、等端点未同时包含、`fixed_version` 非法、
+`severity` 或 `status` 越界。请求体先于编号校验，所以无效请求即使编号不存在也
+返回 `INVALID_INPUT`。
+
+有效请求遇到未知编号返回 HTTP 404 与固定纯文本
+`error=VULNERABILITY_NOT_FOUND`。更新在单个事务内整体成功或整体失败，失败不会
+留下部分字段或区间；有效且编号存在但存储写入失败时返回 HTTP 500 与现有
+`internal_error` JSON 错误对象，不返回 SQL、堆栈或文件路径等内部细节。完整更新
+不改变编号，更新后的查询使用新组件、新区间、新严重等级、新修复版本和新处置
+状态。
+
 ### `PATCH /vulnerabilities/status/:id`
 
 更新已有漏洞的处置状态，请求体为 `{"status":"fixed"}`，取值集合与登记相同。

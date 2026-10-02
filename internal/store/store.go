@@ -125,6 +125,11 @@ func insertVulnerabilityTx(ctx context.Context, tx *sql.Tx, vulnerability *vuln.
 		return fmt.Errorf("insert vulnerability: %w", err)
 	}
 
+	return insertRangesTx(ctx, tx, vulnerability)
+}
+
+// insertRangesTx writes every affected range of the record in record order.
+func insertRangesTx(ctx context.Context, tx *sql.Tx, vulnerability *vuln.Vulnerability) error {
 	for index, affected := range vulnerability.Ranges {
 		var lower, upper any
 		if text := affected.LowerText(); text != "" {
@@ -214,6 +219,57 @@ func (s *Store) UpdateStatus(ctx context.Context, id string, status vuln.Status)
 		return nil, ErrVulnerabilityNotFound
 	}
 	return s.GetVulnerability(ctx, id)
+}
+
+// ReplaceVulnerability overwrites every column of one record except the id,
+// deleting the old affected ranges and inserting the new ones in a single
+// transaction: either the whole replacement is committed or the stored record
+// stays untouched. It returns ErrVulnerabilityNotFound when the id is unknown;
+// that check happens before any write inside the transaction.
+func (s *Store) ReplaceVulnerability(ctx context.Context, vulnerability *vuln.Vulnerability) (*vuln.Vulnerability, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin replace: %w", err)
+	}
+	defer tx.Rollback()
+
+	var existing int
+	switch err := tx.QueryRowContext(ctx,
+		"SELECT 1 FROM vulnerabilities WHERE id = ?", vulnerability.ID,
+	).Scan(&existing); {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil, ErrVulnerabilityNotFound
+	case err != nil:
+		return nil, fmt.Errorf("check existence: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE vulnerabilities SET component = ?, severity = ?, fixed_version = ?, status = ?
+		WHERE id = ?`,
+		vulnerability.Component, string(vulnerability.Severity),
+		vulnerability.FixedVersion, string(vulnerability.Status), vulnerability.ID,
+	); err != nil {
+		return nil, fmt.Errorf("replace vulnerability: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM affected_ranges WHERE vulnerability_id = ?", vulnerability.ID,
+	); err != nil {
+		return nil, fmt.Errorf("delete affected ranges: %w", err)
+	}
+	if err := insertRangesTx(ctx, tx, vulnerability); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit replace: %w", err)
+	}
+
+	replaced, err := s.GetVulnerability(ctx, vulnerability.ID)
+	if err != nil {
+		return nil, fmt.Errorf("load replaced: %w", err)
+	}
+	return replaced, nil
 }
 
 // ListFilter carries the optional equality filters accepted by

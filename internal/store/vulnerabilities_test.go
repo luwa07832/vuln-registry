@@ -155,3 +155,78 @@ func mustParse(t *testing.T, value string) vuln.Version {
 	}
 	return parsed
 }
+
+func TestReplaceVulnerabilityOverwritesEverythingButID(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	original := sampleVulnerability("CVE-2024-2000")
+	if err := original.PrepareRanges(); err != nil {
+		t.Fatalf("prepare original: %v", err)
+	}
+	if err := st.CreateVulnerability(ctx, original); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	lowerFalse := false
+	upperTrue := true
+	replacement := &vuln.Vulnerability{
+		ID:           "CVE-2024-2000",
+		Component:    "openssl",
+		Severity:     vuln.SeverityCritical,
+		FixedVersion: "3.2.2",
+		Status:       vuln.StatusInProgress,
+		Ranges: []vuln.Range{
+			{Upper: &[]string{"1.0.0"}[0], UpperInclude: &lowerFalse},
+			{Lower: &[]string{"2.0.0"}[0], LowerInclude: &upperTrue},
+		},
+	}
+	if err := replacement.PrepareRanges(); err != nil {
+		t.Fatalf("prepare replacement: %v", err)
+	}
+	replaced, err := st.ReplaceVulnerability(ctx, replacement)
+	if err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+	if replaced.Component != "openssl" || replaced.Severity != vuln.SeverityCritical ||
+		replaced.FixedVersion != "3.2.2" || replaced.Status != vuln.StatusInProgress {
+		t.Fatalf("scalar fields not replaced: %#v", replaced)
+	}
+	if len(replaced.Ranges) != 2 || replaced.Ranges[0].LowerText() != "" ||
+		replaced.Ranges[0].UpperText() != "1.0.0" || replaced.Ranges[1].UpperText() != "" ||
+		replaced.Ranges[1].LowerText() != "2.0.0" {
+		t.Fatalf("ranges not replaced in order: %#v", replaced.Ranges)
+	}
+
+	loaded, err := st.GetVulnerability(ctx, "CVE-2024-2000")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if loaded.Component != "openssl" || len(loaded.Ranges) != 2 {
+		t.Fatalf("stored record not replaced: %#v", loaded)
+	}
+	if loaded.Contains(mustParse(t, "1.5")) || !loaded.Contains(mustParse(t, "2.0")) || loaded.Contains(mustParse(t, "1.0")) {
+		t.Fatalf("stored ranges behave like the old record: %#v", loaded.Ranges)
+	}
+
+	oldComponent, err := st.ListByComponent(ctx, "libxml2")
+	if err != nil {
+		t.Fatalf("list old component: %v", err)
+	}
+	if len(oldComponent) != 0 {
+		t.Fatalf("old component rows survived: %#v", oldComponent)
+	}
+
+	if _, err := st.ReplaceVulnerability(ctx, replacement); err != nil {
+		t.Fatalf("idempotent re-replace should keep working: %v", err)
+	}
+	if _, err := st.ReplaceVulnerability(ctx, &vuln.Vulnerability{
+		ID:           "CVE-9999-9999",
+		Component:    "openssl",
+		Severity:     vuln.SeverityLow,
+		FixedVersion: "9.9.9",
+		Status:       vuln.StatusOpen,
+		Ranges:       []vuln.Range{{Lower: &[]string{"1.0"}[0], LowerInclude: &upperTrue}},
+	}); !errors.Is(err, ErrVulnerabilityNotFound) {
+		t.Fatalf("unknown id replace: %v, want ErrVulnerabilityNotFound", err)
+	}
+}

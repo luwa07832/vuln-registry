@@ -139,6 +139,9 @@ func registerHandlers(router *gin.Engine, st *store.Store) {
 	router.GET("/vulnerabilities/:id", func(c *gin.Context) {
 		getVulnerability(c, st)
 	})
+	router.PUT("/vulnerabilities/:id", func(c *gin.Context) {
+		replaceVulnerability(c, st)
+	})
 	router.PATCH("/vulnerabilities/status/:id", func(c *gin.Context) {
 		updateStatus(c, st)
 	})
@@ -179,6 +182,36 @@ func createVulnerability(c *gin.Context, st *store.Store) {
 		return
 	}
 	c.JSON(http.StatusCreated, record)
+}
+
+// replaceVulnerability fully replaces one record while keeping its id. The
+// request body is parsed and validated before the path id is checked, so an
+// invalid body answers INVALID_INPUT even for an unknown id. The store swaps
+// every column and range in one transaction, never leaving a partial record.
+func replaceVulnerability(c *gin.Context, st *store.Store) {
+	var request createVulnerabilityRequest
+	if err := decodeBody(c, &request); err != nil {
+		respondInvalidInput(c)
+		return
+	}
+
+	request.ID = c.Param("id")
+	record, ok := buildVulnerabilityRecord(request)
+	if !ok {
+		respondInvalidInput(c)
+		return
+	}
+
+	replaced, err := st.ReplaceVulnerability(c.Request.Context(), record)
+	if err != nil {
+		if errors.Is(err, store.ErrVulnerabilityNotFound) {
+			respondFixed(c, http.StatusNotFound, codeNotFound)
+			return
+		}
+		respondStorageError(c)
+		return
+	}
+	c.JSON(http.StatusOK, replaced)
 }
 
 // createVulnerabilitiesBatch atomically registers 1 to 100 records. Every
