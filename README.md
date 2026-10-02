@@ -211,6 +211,26 @@ JSON 错误对象格式。
 `error=INVALID_INPUT`；未知编号返回 HTTP 404，响应体固定为纯文本
 `error=VULNERABILITY_NOT_FOUND`。更新只改变处置状态，其余字段保持不变。
 
+### `PATCH /vulnerabilities/statuses`
+
+在一次请求中原子更新多条漏洞的处置状态。请求体是单个 JSON 对象，`updates`
+为 1 到 100 个对象的数组；每个对象使用 `id`（漏洞编号，精确匹配、区分大小写）
+与 `status`（取值集合与登记相同），顶层与每个对象中的无关字段均忽略，数组内
+编号不得重复。
+
+成功返回 HTTP 200 与单个 JSON 对象，`items` 按 `updates` 的请求顺序返回更新后的
+完整记录（字段与按编号读取一致，`affected_ranges` 保持登记顺序，开放边界字段为
+`null`），`count` 等于本次更新条数。每个对象可设置不同状态，但只改变处置状态，
+其余字段保持不变；按编号读取、分页筛选与两类匹配查询立即反映新状态。
+
+- 请求体不是单个 JSON 对象、`updates` 缺失或不是数组、数量为空或超过 100、任一
+  元素不是对象、`id` 缺失或为空、`status` 缺失或非法，或数组内出现重复编号时，
+  返回 HTTP 400 与固定纯文本 `error=INVALID_INPUT`，不修改任何记录。
+- 结构合法但任一编号不存在时，无论未知编号有几个，都返回 HTTP 404 与固定纯文本
+  `error=VULNERABILITY_NOT_FOUND`，不修改任何记录。
+- 存储写入失败时返回 HTTP 500 与现有 `internal_error` JSON 错误对象；批量写入在
+  单个事务内完成，全部成功或全部失败，不会留下部分更新。
+
 ### `PUT /vulnerabilities/:id`
 
 完整修正一条已有漏洞，登记写错后无需更换编号。编号由路径决定，与

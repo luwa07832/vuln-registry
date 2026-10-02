@@ -21,6 +21,7 @@ const (
 	matchMaxComponents  = 100
 	rangeMatchMaxItems  = 100
 	createBatchMaxItems = 100
+	statusBatchMaxItems = 100
 )
 
 // rangeRequest is the affected-range payload of a registration.
@@ -51,6 +52,20 @@ type createVulnerabilitiesBatchResponse struct {
 
 type updateStatusRequest struct {
 	Status string `json:"status"`
+}
+
+type statusUpdateItem struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+}
+
+type updateStatusesRequest struct {
+	Updates []statusUpdateItem `json:"updates"`
+}
+
+type updateStatusesResponse struct {
+	Items []*vuln.Vulnerability `json:"items"`
+	Count int                   `json:"count"`
 }
 
 type matchComponentRequest struct {
@@ -144,6 +159,9 @@ func registerHandlers(router *gin.Engine, st *store.Store) {
 	})
 	router.PATCH("/vulnerabilities/status/:id", func(c *gin.Context) {
 		updateStatus(c, st)
+	})
+	router.PATCH("/vulnerabilities/statuses", func(c *gin.Context) {
+		updateStatuses(c, st)
 	})
 }
 
@@ -478,6 +496,54 @@ func updateStatus(c *gin.Context, st *store.Store) {
 		return
 	}
 	c.JSON(http.StatusOK, record)
+}
+
+// updateStatuses atomically applies 1 to 100 disposition changes. The whole
+// payload is validated before any id is looked up, so invalid input answers
+// INVALID_INPUT even when some ids are unknown; duplicate ids are exact,
+// case-sensitive matches. The store writes every change in one transaction,
+// so an unknown id or a storage failure leaves all records untouched. Items
+// in the response follow the request order, not the id or storage order.
+func updateStatuses(c *gin.Context, st *store.Store) {
+	var request updateStatusesRequest
+	if err := decodeBody(c, &request); err != nil {
+		respondInvalidInput(c)
+		return
+	}
+	if len(request.Updates) == 0 || len(request.Updates) > statusBatchMaxItems {
+		respondInvalidInput(c)
+		return
+	}
+
+	updates := make([]store.StatusUpdate, 0, len(request.Updates))
+	seen := make(map[string]struct{}, len(request.Updates))
+	for _, item := range request.Updates {
+		status := vuln.Status(item.Status)
+		if item.ID == "" || !vuln.ValidStatus(status) {
+			respondInvalidInput(c)
+			return
+		}
+		if _, duplicate := seen[item.ID]; duplicate {
+			respondInvalidInput(c)
+			return
+		}
+		seen[item.ID] = struct{}{}
+		updates = append(updates, store.StatusUpdate{ID: item.ID, Status: status})
+	}
+
+	records, err := st.UpdateStatuses(c.Request.Context(), updates)
+	if err != nil {
+		if errors.Is(err, store.ErrVulnerabilityNotFound) {
+			respondFixed(c, http.StatusNotFound, codeNotFound)
+			return
+		}
+		respondStorageError(c)
+		return
+	}
+	c.JSON(http.StatusOK, updateStatusesResponse{
+		Items: records,
+		Count: len(records),
+	})
 }
 
 // updateVulnerability fully replaces every field of an existing record

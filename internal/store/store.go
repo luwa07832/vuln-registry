@@ -216,6 +216,55 @@ func (s *Store) UpdateStatus(ctx context.Context, id string, status vuln.Status)
 	return s.GetVulnerability(ctx, id)
 }
 
+// StatusUpdate pairs one vulnerability id with the disposition status it
+// should carry after a batch update.
+type StatusUpdate struct {
+	ID     string
+	Status vuln.Status
+}
+
+// UpdateStatuses applies every given status change in a single transaction:
+// either all records are updated or none is. It returns
+// ErrVulnerabilityNotFound when any id is unknown, leaving every record
+// untouched, and only the status column changes. On success the updated
+// records are returned in the order the updates were given.
+func (s *Store) UpdateStatuses(ctx context.Context, updates []StatusUpdate) ([]*vuln.Vulnerability, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin status update: %w", err)
+	}
+	defer tx.Rollback()
+
+	for _, update := range updates {
+		result, err := tx.ExecContext(ctx,
+			"UPDATE vulnerabilities SET status = ? WHERE id = ?", string(update.Status), update.ID)
+		if err != nil {
+			return nil, fmt.Errorf("update status: %w", err)
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return nil, fmt.Errorf("update status rows: %w", err)
+		}
+		if affected == 0 {
+			return nil, ErrVulnerabilityNotFound
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit status update: %w", err)
+	}
+
+	records := make([]*vuln.Vulnerability, 0, len(updates))
+	for _, update := range updates {
+		record, err := s.GetVulnerability(ctx, update.ID)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	return records, nil
+}
+
 // UpdateVulnerability replaces every column except the id and all of the
 // record's affected ranges in a single transaction. It returns
 // ErrVulnerabilityNotFound when the id is unknown; on any failure the
