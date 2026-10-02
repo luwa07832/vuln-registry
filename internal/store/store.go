@@ -216,6 +216,66 @@ func (s *Store) UpdateStatus(ctx context.Context, id string, status vuln.Status)
 	return s.GetVulnerability(ctx, id)
 }
 
+// StatusUpdate names one vulnerability whose disposition status must change.
+// Ids must already be validated and de-duplicated by the caller.
+type StatusUpdate struct {
+	ID     string
+	Status vuln.Status
+}
+
+// UpdateStatuses changes only the disposition status of every named record in
+// one transaction. It returns ErrVulnerabilityNotFound when any id is unknown,
+// in which case the rollback leaves every record untouched; no other column
+// changes. The returned records follow the input order, never id or database
+// order.
+func (s *Store) UpdateStatuses(ctx context.Context, updates []StatusUpdate) ([]*vuln.Vulnerability, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin status update: %w", err)
+	}
+	defer tx.Rollback()
+
+	for _, update := range updates {
+		var existing int
+		switch err := tx.QueryRowContext(ctx,
+			"SELECT 1 FROM vulnerabilities WHERE id = ?", update.ID,
+		).Scan(&existing); {
+		case err == nil:
+		case errors.Is(err, sql.ErrNoRows):
+			return nil, ErrVulnerabilityNotFound
+		default:
+			return nil, fmt.Errorf("check vulnerability: %w", err)
+		}
+
+		result, err := tx.ExecContext(ctx,
+			"UPDATE vulnerabilities SET status = ? WHERE id = ?", string(update.Status), update.ID)
+		if err != nil {
+			return nil, fmt.Errorf("update status: %w", err)
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return nil, fmt.Errorf("update status rows: %w", err)
+		}
+		if affected == 0 {
+			return nil, ErrVulnerabilityNotFound
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit status update: %w", err)
+	}
+
+	records := make([]*vuln.Vulnerability, len(updates))
+	for index, update := range updates {
+		record, err := s.GetVulnerability(ctx, update.ID)
+		if err != nil {
+			return nil, err
+		}
+		records[index] = record
+	}
+	return records, nil
+}
+
 // UpdateVulnerability replaces every column except the id and all of the
 // record's affected ranges in a single transaction. It returns
 // ErrVulnerabilityNotFound when the id is unknown; on any failure the

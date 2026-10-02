@@ -211,6 +211,43 @@ JSON 错误对象格式。
 `error=INVALID_INPUT`；未知编号返回 HTTP 404，响应体固定为纯文本
 `error=VULNERABILITY_NOT_FOUND`。更新只改变处置状态，其余字段保持不变。
 
+### `PATCH /vulnerabilities/statuses`
+
+在一次请求中批量更新多条漏洞的处置状态。请求体是单个 JSON 对象，`updates`
+为 1 到 100 个对象的数组；每个对象只使用 `id` 与 `status` 两个字段：
+
+| 字段 | 要求 |
+|---|---|
+| `id` | 漏洞编号，非空字符串，按精确字符串比较并区分大小写 |
+| `status` | `open`、`in_progress`、`fixed`、`wont_fix`、`accepted` 之一 |
+
+数组内不得出现重复 `id`；顶层与每个对象中的无关 JSON 字段继续忽略。每个对象
+可以设置不同状态，更新只改变各自的 `status`，其余字段（含受影响区间）保持
+不变。
+
+成功返回 HTTP 200 与单个 JSON 对象，`items` 严格按 `updates` 的请求顺序返回
+更新后的完整记录（不按编号或数据库顺序重排），字段仍为 `id`、`component`、
+`affected_ranges`、`severity`、`fixed_version`、`status`，受影响区间保持登记
+顺序且开放边界字段为 `null`；`count` 等于本次更新条数：
+
+```json
+{"items":[{"id":"CVE-2024-0002","component":"libxml2","affected_ranges":[{"lower":"2.0","lower_include":true,"upper":"2.9","upper_include":false},{"lower":null,"lower_include":null,"upper":"1.5.0","upper_include":true}],"severity":"high","fixed_version":"2.10.0","status":"fixed"}],"count":1}
+```
+
+- 请求体不是单个 JSON 对象、解析失败或含多个 JSON 值，`updates` 缺失或不是
+  数组，数组为空或超过 100 项，任一元素不是对象，`id` 缺失或为空，`status`
+  缺失、为 `null` 或不在允许集合内，或数组内出现重复 `id` 时，整次请求返回
+  HTTP 400 与固定纯文本 `error=INVALID_INPUT`，数据库不修改任何记录。
+- 请求结构合法但任一编号不存在时，无论未知编号有几个，整次请求返回
+  HTTP 404 与固定纯文本 `error=VULNERABILITY_NOT_FOUND`，编号按区分大小写的
+  精确字符串匹配；事务回滚保证已知编号也不被修改。
+- 写入整体成功或整体失败：存储写入失败返回 HTTP 500 与现有 `internal_error`
+  JSON 错误对象，不留下部分更新。
+
+本入口与 `PATCH /vulnerabilities/status/:id` 互不影响：单条入口仍只更新路径
+指定的一条记录。批量成功后，按编号读取、分页筛选以及两类匹配查询都会立即
+反映新状态，其余字段、排序、区间并集、版本比较与错误约定保持不变。
+
 ### `PUT /vulnerabilities/:id`
 
 完整修正一条已有漏洞，登记写错后无需更换编号。编号由路径决定，与
