@@ -80,6 +80,53 @@ go run .
 边界非空却缺少对应的包含标志、下界严格大于上界、上下界相等但任一侧为开区间、
 严重等级或处置状态不在允许集合内。登记在单个事务内完成，失败不会部分写入。
 
+### `POST /vulnerabilities/batch`
+
+在单个事务内原子批量登记漏洞。请求体是单个 JSON 对象，`vulnerabilities` 为
+漏洞对象数组，必须包含 1 到 100 项；每个对象的字段、必填条件、版本区间语义、
+严重等级取值、修复版本格式与处置状态取值与 `POST /vulnerabilities` 完全一致。
+顶层与记录中的无关 JSON 字段继续忽略：
+
+```json
+{
+  "vulnerabilities": [
+    {
+      "id": "CVE-2024-0001",
+      "component": "libxml2",
+      "affected_ranges": [
+        {"lower": "2.0", "lower_include": true, "upper": "2.9", "upper_include": false}
+      ],
+      "severity": "high",
+      "fixed_version": "2.10.0",
+      "status": "open"
+    },
+    {
+      "id": "CVE-2024-0002",
+      "component": "zlib",
+      "affected_ranges": [
+        {"upper": "1.2.11", "upper_include": false}
+      ],
+      "severity": "medium",
+      "fixed_version": "1.2.12",
+      "status": "fixed"
+    }
+  ]
+}
+```
+
+全部记录有效且编号唯一时返回 HTTP 201 与单个 JSON 对象，`items` 是与输入顺序
+一致的完整漏洞记录数组（字段投影与单条登记相同，`affected_ranges` 保持各记录内
+的登记顺序，开放边界字段为 `null`），`count` 等于本次成功登记条数。
+
+- 任一记录缺少必填字段、编号或组件为空、`affected_ranges` 为空、版本或区间
+  非法、包含标志缺失或类型错误、严重等级或处置状态非法，或数组不是 1 到 100
+  项时，整次请求返回 HTTP 400 与固定纯文本 `error=INVALID_INPUT`。
+- 数组内出现相同 `id`，或任一 `id` 已存在于数据库时，整次请求返回 HTTP 409 与
+  固定纯文本 `error=DUPLICATE_VULNERABILITY`。输入校验先于重复检查，因此同时
+  存在无效记录与重复编号时仍返回 `INVALID_INPUT`。
+- 批量登记只新增记录，不修改或删除已有记录。任何失败（含存储写入失败）都不会
+  部分提交；存储写入失败时返回 HTTP 500 与 `internal_error` JSON 错误对象。
+
 ### `GET /vulnerabilities/affected`
 
 按组件名称与具体版本查询当前仍受影响的漏洞，查询参数为 `component` 与 `version`。

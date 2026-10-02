@@ -60,6 +60,55 @@ func (s *Store) CreateVulnerability(ctx context.Context, vulnerability *vuln.Vul
 	}
 	defer tx.Rollback()
 
+	if err := insertVulnerability(ctx, tx, vulnerability); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		if isUniqueViolation(err) {
+			return ErrDuplicateVulnerability
+		}
+		return fmt.Errorf("commit create: %w", err)
+	}
+	return nil
+}
+
+// CreateVulnerabilities inserts every record and all of their affected ranges
+// in a single transaction: either all records are written or none is. An id
+// that already exists, or repeats within the batch, yields
+// ErrDuplicateVulnerability without any partial insert.
+func (s *Store) CreateVulnerabilities(ctx context.Context, vulnerabilities []*vuln.Vulnerability) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin create batch: %w", err)
+	}
+	defer tx.Rollback()
+
+	for _, vulnerability := range vulnerabilities {
+		if err := insertVulnerability(ctx, tx, vulnerability); err != nil {
+			return err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		if isUniqueViolation(err) {
+			return ErrDuplicateVulnerability
+		}
+		return fmt.Errorf("commit create batch: %w", err)
+	}
+	return nil
+}
+
+// queryExecer is the subset of *sql.Tx used while inserting records.
+type queryExecer interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// insertVulnerability writes one record and all of its affected ranges inside
+// the caller's transaction, rejecting ids already present in the database or
+// written earlier in the same transaction.
+func insertVulnerability(ctx context.Context, tx queryExecer, vulnerability *vuln.Vulnerability) error {
 	var existing int
 	switch err := tx.QueryRowContext(ctx,
 		"SELECT 1 FROM vulnerabilities WHERE id = ?", vulnerability.ID,
@@ -100,13 +149,6 @@ func (s *Store) CreateVulnerability(ctx context.Context, vulnerability *vuln.Vul
 		); err != nil {
 			return fmt.Errorf("insert affected range: %w", err)
 		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		if isUniqueViolation(err) {
-			return ErrDuplicateVulnerability
-		}
-		return fmt.Errorf("commit create: %w", err)
 	}
 	return nil
 }
