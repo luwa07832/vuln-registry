@@ -121,6 +121,16 @@ type listVulnerabilitiesResponse struct {
 	Total    int                   `json:"total"`
 }
 
+// statusHistoryResponse is the paginated payload of the disposition status
+// events recorded for one vulnerability.
+type statusHistoryResponse struct {
+	ID       string                     `json:"id"`
+	Items    []store.StatusHistoryEvent `json:"items"`
+	Page     int                        `json:"page"`
+	PageSize int                        `json:"page_size"`
+	Total    int                        `json:"total"`
+}
+
 // affectedVulnerability is one element of the affected-query result; it carries
 // only the requested projection of the full record.
 type affectedVulnerability struct {
@@ -154,6 +164,9 @@ func registerHandlers(router *gin.Engine, st *store.Store) {
 	router.GET("/vulnerabilities/:id", func(c *gin.Context) {
 		getVulnerability(c, st)
 	})
+	router.GET("/vulnerabilities/:id/status-history", func(c *gin.Context) {
+		getStatusHistory(c, st)
+	})
 	router.PUT("/vulnerabilities/:id", func(c *gin.Context) {
 		updateVulnerability(c, st)
 	})
@@ -176,6 +189,52 @@ func getVulnerability(c *gin.Context, st *store.Store) {
 		return
 	}
 	c.JSON(http.StatusOK, record)
+}
+
+// getStatusHistory serves the paginated disposition status history of one
+// vulnerability. The path id keeps the exact, case-sensitive matching used
+// by the other per-id entries. Pagination mirrors GET /vulnerabilities:
+// page defaults to 1, page_size to 20 with a 100 ceiling, and only positive
+// decimal integers are accepted. A page past the end yields an empty items
+// array while total still reports the event count.
+func getStatusHistory(c *gin.Context, st *store.Store) {
+	id := c.Param("id")
+
+	page := 1
+	if raw, present := c.GetQuery("page"); present {
+		parsed, ok := parsePositiveDecimal(raw)
+		if !ok {
+			respondInvalidInput(c)
+			return
+		}
+		page = parsed
+	}
+	pageSize := 20
+	if raw, present := c.GetQuery("page_size"); present {
+		parsed, ok := parsePositiveDecimal(raw)
+		if !ok || parsed > 100 {
+			respondInvalidInput(c)
+			return
+		}
+		pageSize = parsed
+	}
+
+	events, total, err := st.StatusHistory(c.Request.Context(), id, page, pageSize)
+	if err != nil {
+		if errors.Is(err, store.ErrVulnerabilityNotFound) {
+			respondFixed(c, http.StatusNotFound, codeNotFound)
+			return
+		}
+		respondStorageError(c)
+		return
+	}
+	c.JSON(http.StatusOK, statusHistoryResponse{
+		ID:       id,
+		Items:    events,
+		Page:     page,
+		PageSize: pageSize,
+		Total:    total,
+	})
 }
 
 func createVulnerability(c *gin.Context, st *store.Store) {

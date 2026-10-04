@@ -256,6 +256,50 @@ HTTP 200 与包含 `id`、`component`、`affected_ranges`、`severity`、
 - 更新整体成功或整体失败，失败不留下部分字段或区间。存储写入失败返回
   HTTP 500 与现有 `internal_error` JSON 错误对象，不泄露 SQL、堆栈或文件路径。
 
+### `GET /vulnerabilities/:id/status-history`
+
+分页查询一条漏洞的处置状态历史。路径编号与其他按编号入口沿用相同的精确
+匹配规则（区分大小写，不做去空格或模糊匹配）。查询参数与 `GET
+/vulnerabilities` 的分页参数一致，均可选：
+
+| 参数 | 要求 |
+|---|---|
+| `page` | 从 1 开始的页码，缺省为 1 |
+| `page_size` | 每页条数，缺省为 20，范围 1 到 100 |
+
+成功返回 HTTP 200 与单个 JSON 对象：
+
+```json
+{"id":"CVE-2024-0001","items":[{"sequence":1,"previous_status":null,"status":"open","source":"create"},{"sequence":2,"previous_status":"open","status":"fixed","source":"status_update"}],"page":1,"page_size":20,"total":2}
+```
+
+`items` 按 `sequence` 升序排列；`sequence` 在同一漏洞内连续递增且从 1
+开始。每个事件含 `previous_status`、`status` 与 `source` 三个字段：
+
+- 通过 `POST /vulnerabilities` 或 `POST /vulnerabilities/batch` 登记漏洞时
+  写入初始事件，`previous_status` 为 `null`，`status` 为登记状态，
+  `source` 为 `create`。
+- `PATCH /vulnerabilities/status/:id` 与 `PATCH /vulnerabilities/statuses`
+  仅在状态真正变化时追加事件，`previous_status` 为修改前状态，`status`
+  为修改后状态，`source` 为 `status_update`；批量入口按提交顺序逐条追加。
+  提交的状态与当前状态相同（包括批量中的某一条）时不写任何历史。
+- `PUT /vulnerabilities/:id` 仅在替换后的状态与当前状态不同时追加事件，
+  `source` 为 `replace`，其余语义同上；状态未变化时不写历史。
+
+历史事件与对应的创建或修改写入处于同一事务，全部成功或全部失败，失败时
+不留下部分业务记录或部分事件。`page` 与 `page_size` 回显有效请求值，
+`total` 为该漏洞的事件总数；页码超过末页时 `items` 为空数组，仍返回
+HTTP 200。使用已有数据库升级时不修改已有漏洞、不补造历史：旧记录从升级
+后第一次真正改变状态时才产生事件，该事件的 `previous_status` 取当时的
+当前状态。
+
+- 编号未知（含大小写不一致）时返回 HTTP 404，响应体固定为纯文本
+  `error=VULNERABILITY_NOT_FOUND`。
+- `page` 或 `page_size` 不是正十进制整数、小于 1 或 `page_size` 超过
+  100 时，返回 HTTP 400 与固定纯文本 `error=INVALID_INPUT`；分页参数
+  先于编号校验。
+- 存储读取失败时返回 HTTP 500 与现有 `internal_error` JSON 错误对象。
+
 ### `GET /vulnerabilities`
 
 分页列出已登记的漏洞。查询参数均可选并任意组合，缺省表示不按该字段过滤：
