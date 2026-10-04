@@ -284,6 +284,32 @@ HTTP 200 与包含 `id`、`component`、`affected_ranges`、`severity`、
 HTTP 400 与纯文本 `error=INVALID_INPUT`。存储读取失败时返回 HTTP 500 与
 `internal_error` JSON 错误对象。
 
+### `GET /vulnerabilities/:id/status-history`
+
+查询指定漏洞的处置状态历史，路径编号与 `GET /vulnerabilities/:id` 沿用相同的
+精确匹配规则（区分大小写）。历史由服务自动记录：登记（含批量登记）时写入初始
+事件（`previous_status` 为 `null`，`source` 为 `create`）；
+`PATCH /vulnerabilities/status/:id`、`PATCH /vulnerabilities/statuses` 与
+`PUT /vulnerabilities/:id` 把状态改成不同值时按提交顺序追加事件（`source`
+分别为 `status_update` 与 `replace`）；状态未变化的修改不写历史。事件与对应的
+创建或修改在同一事务内写入，失败不会留下部分记录或部分事件。
+
+查询参数均可选：`page` 从 1 开始缺省为 1，`page_size` 缺省为 20、范围 1 到
+100。成功返回 HTTP 200 与单个 JSON 对象：
+
+```json
+{"id":"CVE-2024-0001","items":[{"sequence":1,"previous_status":null,"status":"open","source":"create"},{"sequence":2,"previous_status":"open","status":"fixed","source":"status_update"}],"page":1,"page_size":20,"total":2}
+```
+
+`items` 每项包含 `sequence`（从 1 开始连续递增）、`previous_status`、`status`
+与 `source`，按 `sequence` 升序排列；`total` 是事件总数，`page` 与 `page_size`
+回显有效请求值，页码超过末页时 `items` 为空数组。未知编号返回 HTTP 404 与固定
+纯文本 `error=VULNERABILITY_NOT_FOUND`；`page` 或 `page_size` 不是正十进制整数、
+小于允许值或 `page_size` 超过 100 时返回 HTTP 400 与固定纯文本
+`error=INVALID_INPUT`。存储读取失败时返回 HTTP 500 与 `internal_error` JSON
+错误对象。由旧版本升级而来的数据库不改写已有漏洞、不补造历史，旧记录从升级后
+第一次真正改变状态开始产生事件。
+
 ## 版本顺序
 
 版本号是一个或多个用点分隔的十进制数字段（如 `1`、`1.0.3`、`10.2.0`）。

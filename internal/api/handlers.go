@@ -121,6 +121,25 @@ type listVulnerabilitiesResponse struct {
 	Total    int                   `json:"total"`
 }
 
+// statusHistoryItem is one element of the status-history payload; a null
+// previous_status marks the initial registration event.
+type statusHistoryItem struct {
+	Sequence       int          `json:"sequence"`
+	PreviousStatus *vuln.Status `json:"previous_status"`
+	Status         vuln.Status  `json:"status"`
+	Source         string       `json:"source"`
+}
+
+// statusHistoryResponse is the paginated status-history payload; items
+// carries the events of the requested page in sequence order.
+type statusHistoryResponse struct {
+	ID       string              `json:"id"`
+	Items    []statusHistoryItem `json:"items"`
+	Page     int                 `json:"page"`
+	PageSize int                 `json:"page_size"`
+	Total    int                 `json:"total"`
+}
+
 // affectedVulnerability is one element of the affected-query result; it carries
 // only the requested projection of the full record.
 type affectedVulnerability struct {
@@ -153,6 +172,9 @@ func registerHandlers(router *gin.Engine, st *store.Store) {
 	})
 	router.GET("/vulnerabilities/:id", func(c *gin.Context) {
 		getVulnerability(c, st)
+	})
+	router.GET("/vulnerabilities/:id/status-history", func(c *gin.Context) {
+		getStatusHistory(c, st)
 	})
 	router.PUT("/vulnerabilities/:id", func(c *gin.Context) {
 		updateVulnerability(c, st)
@@ -607,23 +629,10 @@ func listVulnerabilities(c *gin.Context, st *store.Store) {
 		filter.Status = &parsed
 	}
 
-	page := 1
-	if raw, present := c.GetQuery("page"); present {
-		parsed, ok := parsePositiveDecimal(raw)
-		if !ok {
-			respondInvalidInput(c)
-			return
-		}
-		page = parsed
-	}
-	pageSize := 20
-	if raw, present := c.GetQuery("page_size"); present {
-		parsed, ok := parsePositiveDecimal(raw)
-		if !ok || parsed > 100 {
-			respondInvalidInput(c)
-			return
-		}
-		pageSize = parsed
+	page, pageSize, ok := parsePagination(c)
+	if !ok {
+		respondInvalidInput(c)
+		return
 	}
 
 	records, total, err := st.ListVulnerabilities(c.Request.Context(), filter, page, pageSize)
@@ -637,6 +646,70 @@ func listVulnerabilities(c *gin.Context, st *store.Store) {
 		PageSize: pageSize,
 		Total:    total,
 	})
+}
+
+// getStatusHistory serves the paginated status-transition trail of one
+// record, with the path id matched exactly and case-sensitively. Pagination
+// parameters are validated before the id is looked up, so invalid input
+// answers INVALID_INPUT even when the id is unknown.
+func getStatusHistory(c *gin.Context, st *store.Store) {
+	page, pageSize, ok := parsePagination(c)
+	if !ok {
+		respondInvalidInput(c)
+		return
+	}
+
+	id := c.Param("id")
+	events, total, err := st.ListStatusHistory(c.Request.Context(), id, page, pageSize)
+	if err != nil {
+		if errors.Is(err, store.ErrVulnerabilityNotFound) {
+			respondFixed(c, http.StatusNotFound, codeNotFound)
+			return
+		}
+		respondStorageError(c)
+		return
+	}
+
+	items := make([]statusHistoryItem, 0, len(events))
+	for _, event := range events {
+		items = append(items, statusHistoryItem{
+			Sequence:       event.Sequence,
+			PreviousStatus: event.PreviousStatus,
+			Status:         event.Status,
+			Source:         event.Source,
+		})
+	}
+	c.JSON(http.StatusOK, statusHistoryResponse{
+		ID:       id,
+		Items:    items,
+		Page:     page,
+		PageSize: pageSize,
+		Total:    total,
+	})
+}
+
+// parsePagination reads the optional page and page_size query parameters,
+// applying the shared defaults (1 and 20) and the page_size ceiling of 100.
+// It reports ok=false when either parameter is present but is not a positive
+// decimal integer within its allowed range.
+func parsePagination(c *gin.Context) (page, pageSize int, ok bool) {
+	page = 1
+	if raw, present := c.GetQuery("page"); present {
+		parsed, valid := parsePositiveDecimal(raw)
+		if !valid {
+			return 0, 0, false
+		}
+		page = parsed
+	}
+	pageSize = 20
+	if raw, present := c.GetQuery("page_size"); present {
+		parsed, valid := parsePositiveDecimal(raw)
+		if !valid || parsed > 100 {
+			return 0, 0, false
+		}
+		pageSize = parsed
+	}
+	return page, pageSize, true
 }
 
 // parsePositiveDecimal accepts only strings of decimal digits that form a

@@ -22,6 +22,13 @@ var (
 	ErrVulnerabilityNotFound = errors.New("vulnerability not found")
 )
 
+// Status history sources recorded with every event.
+const (
+	StatusSourceCreate       = "create"
+	StatusSourceStatusUpdate = "status_update"
+	StatusSourceReplace      = "replace"
+)
+
 // Store wraps the SQLite handle so callers never touch database/sql directly.
 type Store struct {
 	db *sql.DB
@@ -125,6 +132,10 @@ func insertVulnerabilityTx(ctx context.Context, tx *sql.Tx, vulnerability *vuln.
 		return fmt.Errorf("insert vulnerability: %w", err)
 	}
 
+	if err := insertStatusEventTx(ctx, tx, vulnerability.ID, nil, vulnerability.Status, StatusSourceCreate); err != nil {
+		return err
+	}
+
 	for index, affected := range vulnerability.Ranges {
 		var lower, upper any
 		if text := affected.LowerText(); text != "" {
@@ -143,6 +154,31 @@ func insertVulnerabilityTx(ctx context.Context, tx *sql.Tx, vulnerability *vuln.
 		); err != nil {
 			return fmt.Errorf("insert affected range: %w", err)
 		}
+	}
+	return nil
+}
+
+// insertStatusEventTx appends one event to the status history of id inside
+// the open transaction, assigning the next per-record sequence number. A nil
+// previous marks the initial registration event.
+func insertStatusEventTx(ctx context.Context, tx *sql.Tx, id string, previous *vuln.Status, status vuln.Status, source string) error {
+	var sequence int
+	if err := tx.QueryRowContext(ctx,
+		"SELECT COALESCE(MAX(sequence), 0) + 1 FROM status_history WHERE vulnerability_id = ?", id,
+	).Scan(&sequence); err != nil {
+		return fmt.Errorf("next status sequence: %w", err)
+	}
+
+	var previousArg any
+	if previous != nil {
+		previousArg = string(*previous)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO status_history (vulnerability_id, sequence, previous_status, status, source)
+		VALUES (?, ?, ?, ?, ?)`,
+		id, sequence, previousArg, string(status), source,
+	); err != nil {
+		return fmt.Errorf("insert status event: %w", err)
 	}
 	return nil
 }
@@ -197,23 +233,52 @@ func (s *Store) ListByComponent(ctx context.Context, component string) ([]*vuln.
 	return vulnerabilities, nil
 }
 
-// UpdateStatus changes only the disposition status of one record. It returns
-// ErrVulnerabilityNotFound when the id is unknown; every other column stays
-// untouched.
+// UpdateStatus changes only the disposition status of one record and records
+// the transition in the status history when the value actually changes, all
+// in a single transaction. It returns ErrVulnerabilityNotFound when the id
+// is unknown; every other column stays untouched.
 func (s *Store) UpdateStatus(ctx context.Context, id string, status vuln.Status) (*vuln.Vulnerability, error) {
-	result, err := s.db.ExecContext(ctx,
-		"UPDATE vulnerabilities SET status = ? WHERE id = ?", string(status), id)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, fmt.Errorf("update status: %w", err)
+		return nil, fmt.Errorf("begin status update: %w", err)
 	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return nil, fmt.Errorf("update status rows: %w", err)
+	defer tx.Rollback()
+
+	if err := updateStatusTx(ctx, tx, id, status, StatusSourceStatusUpdate); err != nil {
+		return nil, err
 	}
-	if affected == 0 {
-		return nil, ErrVulnerabilityNotFound
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit status update: %w", err)
 	}
 	return s.GetVulnerability(ctx, id)
+}
+
+// updateStatusTx applies one disposition change inside the open transaction
+// and appends a history event with the given source when the value actually
+// changes. It returns ErrVulnerabilityNotFound when the id is unknown.
+func updateStatusTx(ctx context.Context, tx *sql.Tx, id string, status vuln.Status, source string) error {
+	var previous string
+	switch err := tx.QueryRowContext(ctx,
+		"SELECT status FROM vulnerabilities WHERE id = ?", id,
+	).Scan(&previous); {
+	case errors.Is(err, sql.ErrNoRows):
+		return ErrVulnerabilityNotFound
+	case err != nil:
+		return fmt.Errorf("load current status: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE vulnerabilities SET status = ? WHERE id = ?", string(status), id,
+	); err != nil {
+		return fmt.Errorf("update status: %w", err)
+	}
+
+	if vuln.Status(previous) == status {
+		return nil
+	}
+	previousStatus := vuln.Status(previous)
+	return insertStatusEventTx(ctx, tx, id, &previousStatus, status, source)
 }
 
 // StatusUpdate pairs one vulnerability id with the disposition status it
@@ -224,7 +289,8 @@ type StatusUpdate struct {
 }
 
 // UpdateStatuses applies every given status change in a single transaction:
-// either all records are updated or none is. It returns
+// either all records are updated or none is. Every actual change appends a
+// status-history event in submission order inside the same transaction. It returns
 // ErrVulnerabilityNotFound when any id is unknown, leaving every record
 // untouched, and only the status column changes. On success the updated
 // records are returned in the order the updates were given.
@@ -236,17 +302,8 @@ func (s *Store) UpdateStatuses(ctx context.Context, updates []StatusUpdate) ([]*
 	defer tx.Rollback()
 
 	for _, update := range updates {
-		result, err := tx.ExecContext(ctx,
-			"UPDATE vulnerabilities SET status = ? WHERE id = ?", string(update.Status), update.ID)
-		if err != nil {
-			return nil, fmt.Errorf("update status: %w", err)
-		}
-		affected, err := result.RowsAffected()
-		if err != nil {
-			return nil, fmt.Errorf("update status rows: %w", err)
-		}
-		if affected == 0 {
-			return nil, ErrVulnerabilityNotFound
+		if err := updateStatusTx(ctx, tx, update.ID, update.Status, StatusSourceStatusUpdate); err != nil {
+			return nil, err
 		}
 	}
 
@@ -266,7 +323,9 @@ func (s *Store) UpdateStatuses(ctx context.Context, updates []StatusUpdate) ([]*
 }
 
 // UpdateVulnerability replaces every column except the id and all of the
-// record's affected ranges in a single transaction. It returns
+// record's affected ranges in a single transaction. When the replacement
+// changes the disposition status, the transition is appended to the status
+// history inside the same transaction. It returns
 // ErrVulnerabilityNotFound when the id is unknown; on any failure the
 // transaction rolls back and the stored record stays byte-for-byte intact.
 // The id on vulnerability must already equal the path id; callers validate
@@ -277,6 +336,16 @@ func (s *Store) UpdateVulnerability(ctx context.Context, vulnerability *vuln.Vul
 		return nil, fmt.Errorf("begin update: %w", err)
 	}
 	defer tx.Rollback()
+
+	var previous string
+	switch err := tx.QueryRowContext(ctx,
+		"SELECT status FROM vulnerabilities WHERE id = ?", vulnerability.ID,
+	).Scan(&previous); {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil, ErrVulnerabilityNotFound
+	case err != nil:
+		return nil, fmt.Errorf("load current status: %w", err)
+	}
 
 	result, err := tx.ExecContext(ctx, `
 		UPDATE vulnerabilities
@@ -293,6 +362,13 @@ func (s *Store) UpdateVulnerability(ctx context.Context, vulnerability *vuln.Vul
 	}
 	if affectedRows == 0 {
 		return nil, ErrVulnerabilityNotFound
+	}
+
+	if vuln.Status(previous) != vulnerability.Status {
+		previousStatus := vuln.Status(previous)
+		if err := insertStatusEventTx(ctx, tx, vulnerability.ID, &previousStatus, vulnerability.Status, StatusSourceReplace); err != nil {
+			return nil, err
+		}
 	}
 
 	if _, err := tx.ExecContext(ctx,
@@ -324,6 +400,70 @@ func (s *Store) UpdateVulnerability(ctx context.Context, vulnerability *vuln.Vul
 		return nil, fmt.Errorf("commit update: %w", err)
 	}
 	return s.GetVulnerability(ctx, vulnerability.ID)
+}
+
+// StatusEvent is one recorded transition in the status history of a
+// vulnerability. PreviousStatus is nil only for the initial registration
+// event.
+type StatusEvent struct {
+	Sequence       int
+	PreviousStatus *vuln.Status
+	Status         vuln.Status
+	Source         string
+}
+
+// ListStatusHistory returns the recorded status transitions of one record,
+// ordered by sequence ascending and sliced to the requested 1-based page,
+// along with the total number of events before slicing. A page past the end
+// yields an empty slice with the total still reported. It returns
+// ErrVulnerabilityNotFound when the id is unknown.
+func (s *Store) ListStatusHistory(ctx context.Context, id string, page, pageSize int) ([]StatusEvent, int, error) {
+	var existing int
+	switch err := s.db.QueryRowContext(ctx,
+		"SELECT 1 FROM vulnerabilities WHERE id = ?", id,
+	).Scan(&existing); {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil, 0, ErrVulnerabilityNotFound
+	case err != nil:
+		return nil, 0, fmt.Errorf("check vulnerability: %w", err)
+	}
+
+	var total int
+	if err := s.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM status_history WHERE vulnerability_id = ?", id,
+	).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count status history: %w", err)
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT sequence, previous_status, status, source
+		FROM status_history WHERE vulnerability_id = ?
+		ORDER BY sequence ASC LIMIT ? OFFSET ?`, id, pageSize, (page-1)*pageSize)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list status history: %w", err)
+	}
+	defer rows.Close()
+
+	events := []StatusEvent{}
+	for rows.Next() {
+		var event StatusEvent
+		var previous sql.NullString
+		var status, source string
+		if err := rows.Scan(&event.Sequence, &previous, &status, &source); err != nil {
+			return nil, 0, fmt.Errorf("scan status event: %w", err)
+		}
+		if previous.Valid {
+			previousStatus := vuln.Status(previous.String)
+			event.PreviousStatus = &previousStatus
+		}
+		event.Status = vuln.Status(status)
+		event.Source = source
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("scan status history: %w", err)
+	}
+	return events, total, nil
 }
 
 // ListFilter carries the optional equality filters accepted by
@@ -503,5 +643,15 @@ CREATE TABLE IF NOT EXISTS affected_ranges (
 	upper_version    TEXT,
 	upper_include    INTEGER NOT NULL DEFAULT 0,
 	PRIMARY KEY (vulnerability_id, position)
+);
+
+CREATE TABLE IF NOT EXISTS status_history (
+	vulnerability_id TEXT    NOT NULL
+		REFERENCES vulnerabilities(id) ON DELETE CASCADE,
+	sequence         INTEGER NOT NULL,
+	previous_status  TEXT,
+	status           TEXT    NOT NULL,
+	source           TEXT    NOT NULL,
+	PRIMARY KEY (vulnerability_id, sequence)
 );
 `
